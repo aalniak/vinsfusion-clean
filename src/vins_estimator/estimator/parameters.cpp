@@ -218,7 +218,26 @@ void Parameters::read_from_file(const std::string &config_file) {
               << std::endl;
     loss_parameter_initial = 1.0;
   } else {
-    fsSettings["loss_parameter_initial"] >> loss_parameter_initial;
+    fsSettings["loss_parameter_in,itial"] >> loss_parameter_initial;
+  }
+
+  // check tracking_outlier_rejection
+  if (fsSettings["tracking_outlier_rejection"].empty()) {
+    std::cerr << "ERROR: tracking_outlier_rejection not set in config file, "
+                 "defaulting to false"
+              << std::endl;
+    tracking_outlier_rejection = false;
+  } else {
+    fsSettings["tracking_outlier_rejection"] >> tracking_outlier_rejection;
+  }
+
+  if (fsSettings["tracking_prediction"].empty()) {
+    std::cerr << "ERROR: tracking_prediction not set in config file, "
+                 "defaulting to false"
+              << std::endl;
+    tracking_prediction = false;
+  } else {
+    fsSettings["tracking_prediction"] >> tracking_prediction;
   }
 
   fsSettings.release();

@@ -84,6 +84,9 @@ struct Parameters {
   LossType loss_type_initial;
   double loss_parameter_initial;
 
+  bool tracking_outlier_rejection;
+  bool tracking_prediction;
+
   void read_from_file(const std::string &config_file);
 };
 
