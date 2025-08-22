@@ -37,7 +37,11 @@ RUN git clone --depth 1 --branch 2.2.0 https://ceres-solver.googlesource.com/cer
 WORKDIR /ceres-solver
 RUN mkdir build \
     && cd build \
-    && cmake ../ \
+    && cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCERES_ENABLE_CUDA=OFF \
+    -DBUILD_TESTING=OFF \
+    -DBUILD_EXAMPLES=OFF \
     && make -j8 \
     && make test \
     && make install
