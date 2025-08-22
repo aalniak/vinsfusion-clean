@@ -67,7 +67,8 @@ cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg) {
 void sync_process() {
   while (ros::ok()) {
     if (params->stereo) {
-      cv::Mat image0, image1;
+      cv::Mat image0;
+      cv::Mat image1;
       std_msgs::Header header;
       double time = 0;
       m_buf.lock();
@@ -124,7 +125,6 @@ void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg) {
   Vector3d acc(dx, dy, dz);
   Vector3d gyr(rx, ry, rz);
   estimator->inputIMU(t, acc, gyr);
-  return;
 }
 
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg) {
@@ -153,38 +153,34 @@ void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg) {
   }
   double t = feature_msg->header.stamp.toSec();
   estimator->inputFeature(t, featureFrame);
-  return;
 }
 
 void restart_callback(const std_msgs::BoolConstPtr &restart_msg) {
-  if (restart_msg->data == true) {
+  if (restart_msg->data == 1) {
     ROS_WARN("restart the estimator!");
     estimator->clearState();
     estimator->setParameter();
   }
-  return;
 }
 
 void imu_switch_callback(const std_msgs::BoolConstPtr &switch_msg) {
-  if (switch_msg->data == true) {
+  if (switch_msg->data == 1) {
     // ROS_WARN("use IMU!");
     estimator->changeSensorType(1, params->stereo);
   } else {
     // ROS_WARN("disable IMU!");
     estimator->changeSensorType(0, params->stereo);
   }
-  return;
 }
 
 void cam_switch_callback(const std_msgs::BoolConstPtr &switch_msg) {
-  if (switch_msg->data == true) {
+  if (switch_msg->data == 1) {
     // ROS_WARN("use stereo!");
     estimator->changeSensorType(params->use_imu, 1);
   } else {
     // ROS_WARN("use mono camera (left)!");
     estimator->changeSensorType(params->use_imu, 0);
   }
-  return;
 }
 
 int main(int argc, char **argv) {

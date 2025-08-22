@@ -36,18 +36,17 @@
 #include <opencv2/core/eigen.hpp>
 #include <queue>
 #include <thread>
-#include <unordered_map>
 
 namespace vins::estimator {
 
 class Estimator {
  public:
-  Estimator(Parameters &params);
+  explicit Estimator(Parameters &params);
   ~Estimator();
   void setParameter();
 
   // interface
-  void initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r);
+  void initFirstPose(const Eigen::Vector3d &p, const Eigen::Matrix3d &r);
   void inputIMU(double t, const Vector3d &linearAcceleration,
                 const Vector3d &angularVelocity);
   void inputFeature(
@@ -59,7 +58,7 @@ class Estimator {
                   const Vector3d &angular_velocity);
   void processImage(
       const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
-      const double header);
+      double header);
   void processMeasurements();
   void changeSensorType(int use_imu, int use_stereo);
 
@@ -80,15 +79,15 @@ class Estimator {
                       vector<pair<double, Eigen::Vector3d>> &gyrVector);
   void getPoseInWorldFrame(Eigen::Matrix4d &T);
   void getPoseInWorldFrame(int index, Eigen::Matrix4d &T);
-  void predictPtsInNextFrame();
+  map<int, Eigen::Vector3d> predictPtsInNextFrame();
   void outliersRejection(set<int> &removeIndex);
   double reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici,
                            Vector3d &tici, Matrix3d &Rj, Vector3d &Pj,
                            Matrix3d &ricj, Vector3d &ticj, double depth,
                            Vector3d &uvi, Vector3d &uvj);
   void updateLatestStates();
-  void fastPredictIMU(double t, Eigen::Vector3d linear_acceleration,
-                      Eigen::Vector3d angular_velocity);
+  void fastPredictIMU(double t, const Eigen::Vector3d &linear_acceleration,
+                      const Eigen::Vector3d &angular_velocity);
   bool IMUAvailable(double t);
   void initFirstIMUPose(vector<pair<double, Eigen::Vector3d>> &accVector);
 
@@ -105,6 +104,8 @@ class Estimator {
   queue<pair<double, Eigen::Vector3d>> gyrBuf;
   queue<pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>>>
       featureBuf;
+  queue<set<int>> outlierBuf;
+  queue<map<int, Eigen::Vector3d>> predictBuf;
   double prevTime = 0.0;
   double curTime = 0.0;
   bool openExEstimation = false;
