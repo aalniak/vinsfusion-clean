@@ -218,7 +218,7 @@ void Parameters::read_from_file(const std::string &config_file) {
               << std::endl;
     loss_parameter_initial = 1.0;
   } else {
-    fsSettings["loss_parameter_in,itial"] >> loss_parameter_initial;
+    fsSettings["loss_parameter_initial"] >> loss_parameter_initial;
   }
 
   // check tracking_outlier_rejection
