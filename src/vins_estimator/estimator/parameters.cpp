@@ -240,6 +240,15 @@ void Parameters::read_from_file(const std::string &config_file) {
     fsSettings["tracking_prediction"] >> tracking_prediction;
   }
 
+  if (fsSettings["stereo_init"].empty()) {
+    std::cerr << "ERROR: stereo_init not set in config file, "
+                 "defaulting to false"
+              << std::endl;
+    stereo_init = false;
+  } else {
+    fsSettings["stereo_init"] >> stereo_init;
+  }
+
   fsSettings.release();
 
   std::cout << "loss type: " << loss_type

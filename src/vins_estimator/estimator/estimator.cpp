@@ -513,6 +513,13 @@ void Estimator::processImage(
 
   } else {
     TicToc t_solve;
+    static int counter = 0;
+    if (params.stereo_init && params.stereo && counter > 100) {
+      params.stereo = false;
+    } else {
+      counter++;
+    }
+
     if (!params.use_imu)
       f_manager.initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
     f_manager.triangulate(frame_count, Ps, Rs, tic, ric);

@@ -87,6 +87,8 @@ struct Parameters {
   bool tracking_outlier_rejection;
   bool tracking_prediction;
 
+  bool stereo_init;
+
   void read_from_file(const std::string &config_file);
 };
 
