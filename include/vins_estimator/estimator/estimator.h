@@ -181,6 +181,8 @@ class Estimator {
 
   bool initFirstPoseFlag = false;
   bool initThreadFlag = false;
+
+  int stereo_init_counter = 0;
 };
 
 }  // namespace vins::estimator

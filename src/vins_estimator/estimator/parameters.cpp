@@ -249,6 +249,15 @@ void Parameters::read_from_file(const std::string &config_file) {
     fsSettings["stereo_init"] >> stereo_init;
   }
 
+  if (fsSettings["stereo_init_lag"].empty()) {
+    std::cerr << "ERROR: stereo_init_lag not set in config file, "
+                 "defaulting to 0"
+              << std::endl;
+    stereo_init_lag = 0;
+  } else {
+    fsSettings["stereo_init_lag"] >> stereo_init_lag;
+  }
+
   fsSettings.release();
 
   std::cout << "loss type: " << loss_type

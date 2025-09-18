@@ -513,11 +513,10 @@ void Estimator::processImage(
 
   } else {
     TicToc t_solve;
-    static int counter = 0;
-    if (params.stereo_init && params.stereo && counter > 100) {
+    if (params.stereo_init && params.stereo && stereo_init_counter > params.stereo_init_lag) {
       params.stereo = false;
     } else {
-      counter++;
+      stereo_init_counter++;
     }
 
     if (!params.use_imu)

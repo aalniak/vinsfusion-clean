@@ -88,6 +88,7 @@ struct Parameters {
   bool tracking_prediction;
 
   bool stereo_init;
+  int stereo_init_lag;
 
   void read_from_file(const std::string &config_file);
 };
