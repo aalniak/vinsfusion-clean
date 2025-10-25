@@ -61,6 +61,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf
   cv_bridge
   image_transport
+  message_generation
 )
 
 find_package(OpenCV REQUIRED)
@@ -93,12 +94,23 @@ if (EIGEN3_LIBS)
   set(Eigen3_LIBRARIES ${EIGEN3_LIBS})
 endif()
 
+
+add_service_files(
+  FILES
+  EstimateDepth.srv
+)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs sensor_msgs
+)
+
 ## Declare catkin package
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES vins_lib
-  CATKIN_DEPENDS roscpp std_msgs geometry_msgs nav_msgs tf cv_bridge image_transport
-  DEPENDS OpenCV Ceres Eigen3
+  CATKIN_DEPENDS roscpp std_msgs geometry_msgs nav_msgs tf cv_bridge image_transport message_runtime
+  DEPENDS OpenCV Ceres Eigen3 
 )
 
 ## Create executables separately if needed
@@ -129,6 +141,8 @@ add_executable(
   src/camodocal/camera_models/EquidistantCamera.cc
   src/camodocal/camera_models/ScaramuzzaCamera.cc
 )
+
+add_dependencies(vins_node ${catkin_EXPORTED_TARGETS}) ##to ensure required headers are built before required
 
 target_link_libraries(vins_node
   ${catkin_LIBRARIES}
@@ -181,3 +195,12 @@ target_link_libraries(global_fusion_node
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
 )
+
+install(DIRECTORY launch/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
+install(PROGRAMS scripts/depth.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+

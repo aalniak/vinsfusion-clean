@@ -22,6 +22,8 @@
 #include <opencv2/opencv.hpp>
 #include <queue>
 #include <thread>
+#include <functional>
+#include "vins/EstimateDepth.h"
 
 using namespace vins::estimator;
 
@@ -64,7 +66,7 @@ cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg) {
 }
 
 // extract images with same timestamp from two topics
-void sync_process() {
+void sync_process(ros::ServiceClient& depth_client) {
   while (ros::ok()) {
     if (params->stereo) {
       cv::Mat image0;
@@ -93,20 +95,43 @@ void sync_process() {
         }
       }
       m_buf.unlock();
-      if (!image0.empty()) estimator->inputImage(time, image0, image1);
-    } else {
+      if (!image0.empty()) estimator->inputImage(time, image0, cv::Mat(), image1); // no depth support for stereo case
+    } else { //add depth stuff only into monocular case
       cv::Mat image;
       std_msgs::Header header;
       double time = 0;
+      sensor_msgs::ImageConstPtr img_msg_ptr;
       m_buf.lock();
       if (!img0_buf.empty()) {
         time = img0_buf.front()->header.stamp.toSec();
         header = img0_buf.front()->header;
+        img_msg_ptr = img0_buf.front();
         image = getImageFromMsg(img0_buf.front());
         img0_buf.pop();
       }
       m_buf.unlock();
-      if (!image.empty()) estimator->inputImage(time, image);
+      if (!image.empty()) {
+          cv::Mat depth_image;
+          vins::EstimateDepth srv;
+          srv.request.input_image = *img_msg_ptr; //original message goes in
+
+          if (depth_client.call(srv)) {
+              // We got a response
+              ROS_DEBUG("Successfully received depth map!");
+              try {
+                  // Convert the 32FC1 ROS message back to an OpenCV Mat
+                  cv_bridge::CvImageConstPtr cv_ptr;
+                  cv_ptr = cv_bridge::toCvCopy(srv.response.depth_map, sensor_msgs::image_encodings::TYPE_32FC1);
+                  depth_image = cv_ptr->image;
+              } catch (cv_bridge::Exception& e) {
+                  ROS_ERROR("cv_bridge exception: %s", e.what());
+              }
+          } else {
+              ROS_ERROR("Failed to call depth service. Is the python node running?");
+              // Decide how to handle failure: continue, return, or send empty Mat
+          }
+          estimator->inputImage(time, image, depth_image);
+      }
     }
 
     std::chrono::milliseconds dura(2);
@@ -213,6 +238,13 @@ int main(int argc, char **argv) {
 
   registerPub(n);
 
+  ros::ServiceClient depth_client;
+  depth_client = n.serviceClient<vins::EstimateDepth>("/estimate_depth");
+
+  ROS_INFO("Waiting for depth service '/estimate_depth'...");
+  depth_client.waitForExistence();
+  ROS_INFO("Depth service connected!");
+
   ros::Subscriber sub_imu;
   if (params->use_imu) {
     sub_imu = n.subscribe(params->imu_topic, 2000, imu_callback,
@@ -233,7 +265,7 @@ int main(int argc, char **argv) {
   ros::Subscriber sub_cam_switch =
       n.subscribe("/vins_cam_switch", 100, cam_switch_callback);
 
-  std::thread sync_thread{sync_process};
+  std::thread sync_thread{sync_process, std::ref(depth_client)};
   ros::spin();
 
   if (sync_thread.joinable()) {

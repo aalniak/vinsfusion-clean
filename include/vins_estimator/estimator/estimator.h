@@ -52,7 +52,7 @@ class Estimator {
   void inputFeature(
       double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
                     &featureFrame);
-  void inputImage(double t, const cv::Mat &_img,
+  void inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_img, 
                   const cv::Mat &_img1 = cv::Mat());
   void processIMU(double t, double dt, const Vector3d &linear_acceleration,
                   const Vector3d &angular_velocity);

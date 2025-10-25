@@ -1,0 +1,5 @@
+# Request: What C++ sends (requests)
+sensor_msgs/Image input_image
+---
+# Response: What Python sends back
+sensor_msgs/Image depth_map

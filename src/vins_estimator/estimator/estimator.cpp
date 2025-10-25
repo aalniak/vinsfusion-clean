@@ -12,6 +12,9 @@
 #include <vins_estimator/estimator/parameters.h>
 #include <vins_estimator/utility/visualization.h>
 
+#include <opencv2/opencv.hpp>
+#include <opencv2/highgui.hpp> // For debug purposes
+
 #include <cassert>
 #include <cstddef>
 
@@ -153,9 +156,32 @@ void Estimator::changeSensorType(int use_imu, int use_stereo) {
   }
 }
 
-void Estimator::inputImage(double t, const cv::Mat &_img,
+void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_img, 
                            const cv::Mat &_img1) {
   inputImageCnt++;
+
+  // A visualization to debug
+  if (!depth_img.empty())
+  {
+      // Normalize the 32FC1 float image to 0-255 (8UC1)
+      cv::Mat viz_depth;
+      cv::normalize(depth_img, viz_depth, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+
+      // Apply a colormap (same as your Python script)
+      cv::Mat color_depth;
+      cv::applyColorMap(viz_depth, color_depth, cv::COLORMAP_INFERNO);
+
+      // Show the image in a window
+      cv::imshow("Depth Map", color_depth);
+      
+      // We can also show the original RGB image to compare
+      cv::imshow("Input Image", _img);
+      
+      // 4. IMPORTANT: Wait 1ms for OpenCV to process GUI events
+      cv::waitKey(1);
+  }
+  // --- NEW VISUALIZATION CODE END ---
+
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
   TicToc featureTrackerTime;
 

@@ -1,0 +1,31 @@
+<launch>
+    <arg name="config_path" default="$(find vins)/config/euroc/euroc_mono_imu_config.yaml" />
+    <arg name="bag_path"    default="/path/to/your/YOUR_DATASET_FOLDER/MH_01_easy.bag" />
+    <arg name="nowait"      default="false" />
+    <arg name="rviz"        default="true" />
+    
+    <arg name="model_path"  default="/depth/checkpoints/depth_anything_AC_vits.pth" />
+
+    <node name="rvizvisualisation" pkg="rviz" type="rviz" output="log"
+        args="-d $(find vins)/config/vins_rviz_config.rviz"
+        if="$(arg rviz)" />
+
+    <node name="vins_estimator" pkg="vins" type="vins_node" output="screen" required="true">
+        <param name="config_path" value="$(arg config_path)" />
+    </node>
+
+    <node name="loop_fusion" pkg="vins" type="loop_fusion_node" output="screen">
+        <param name="config_path" value="$(arg config_path)" />
+    </node>
+    
+    <node name="depth_server_node" pkg="vins" type="depth.py" output="screen" required="true">
+        <param name="model_path"  value="$(arg model_path)" />
+        
+        <param name="encoder"     value="vits" />
+        <param name="input_size"  value="518" />
+        <param name="device"      value="cuda" /> 
+    </node>
+
+    <node name="rosbag_play" pkg="rosbag" type="play" output="screen" args="$(arg bag_path)"
+        required="$(arg nowait)" />
+</launch>
