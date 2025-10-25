@@ -13,6 +13,7 @@ docker run \
     --device=/dev/video0 \
     -v "$HOME/.ws/vinsfusion/:/root/catkin_ws/" \
     -v "$(pwd)/:/root/catkin_ws/src/VINS-Fusion/" \
+    --runtime nvidia --gpus all \
     -v "$1:/datasets/" \
     -v "$2:/depth/" \
     ros:vins-fusion \
