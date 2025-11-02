@@ -19,7 +19,7 @@ for d in "$HOST_DIR_1" "$HOST_DIR_2"; do
 done
 
 # Defaults (override via env if you want)
-IMAGE=noetic-on-jammy-l4t:latest
+IMAGE=ros:vins-fusion
 NAME="${NAME:-jetson_container_$(date +%Y%m%d_%H%M%S)}"
 SHM_SIZE="${SHM_SIZE:-8g}"
 
