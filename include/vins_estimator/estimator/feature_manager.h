@@ -10,7 +10,7 @@
 
 #ifndef FEATURE_MANAGER_H
 #define FEATURE_MANAGER_H
-
+#include <fstream> //specifically for jetson's tedious compiler
 #include <algorithm>
 #include <list>
 #include <numeric>
