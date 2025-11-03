@@ -9,7 +9,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TERM=xterm \
     PYTHONIOENCODING=UTF-8 \
     ROS_DISTRO=noetic \
-    ROS_INSTALL_PREFIX=/opt/ros/noetic
+    ROS_INSTALL_PREFIX=/opt/ros/noetic \
+    VENV_PATH=/opt/venv \
+    # Make venv take precedence and avoid user-site leakage (mismatch cause)
+    PATH=/opt/venv/bin:$PATH \
+    PYTHONNOUSERSITE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 
 # Add ROS apt source for focal (needed for keys/rosdep metadata); import key
 # (Using apt-key here for parity with your script inside a container context)
@@ -28,6 +34,12 @@ RUN apt-get update && \
       libssl-dev libbz2-dev liblz4-tool \
       equivs && \
     rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv "${VENV_PATH}" && \
+    "${VENV_PATH}/bin/python" -m ensurepip --upgrade && \
+    "${VENV_PATH}/bin/python" -m pip install -U pip wheel setuptools && \
+    # show where pip is to confirm it’s the venv one
+    "${VENV_PATH}/bin/python" -m pip --version
 
 # ---------------------------------------------
 # Installation of ROS1 Noetic on Jammy (22.04) 
@@ -131,5 +143,7 @@ RUN bash -lc '\
   catkin config --cmake-args -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPython3_EXECUTABLE=/usr/bin/python3 \
 '
 
+RUN pip install torch
+RUN pip install --upgrade --force-reinstall "numpy<2,>=1.24"
 # Default to bash with ROS env on interactive shells
 CMD ["/bin/bash"]
