@@ -1,3 +1,12 @@
+# Merge to 22.04
+
+This branch contains Dockerfile and run.sh script that is tailored to run ROS-Noetic on Ubuntu 22.04 specifically for JetPack 6.x limitation on Jetson devices. Default commands of the repository still applies, with the run script having two mount arguments now. After building the docker container, it is possible to run the container with a simple script, which is easily adjustable along with their mounted names under docker/run.sh. Generic use is as follows:
+
+```bash
+bash docker/run.sh /first/folder/to/mount /second/folder/to/mount
+```
+
+
 # vinsfusion-clean
 
 This repository contains a cleaned up and properly containerized version of the VINS-Fusion project.
