@@ -27,6 +27,7 @@ It is also worth noting that in `docker/run.sh`, there are specific lines coming
 ## 3. ZED Support
 Navigate to zed folder for extensive README.
 
+##
 The rest of the workflow is parallel to the forked version, as can be seen just below. Good luck.
 
 # vinsfusion-clean
