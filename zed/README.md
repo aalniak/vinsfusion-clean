@@ -26,7 +26,7 @@ After running, it detaches the roscore stuff for possible debug purposes with ro
 ## 3. ROS1_Bridge Container
 As our system works in Ubuntu 22.04 (Jammy), and ZED SDK does not have ROS1 support for Jammy, [ros1_bridge](https://github.com/ros2/ros1_bridge) is an absolute necessity. It simply receives messages in ROS2 convention and transforms them into ROS1 then propagate to the ROS1 master.
 
-The only nuance is that this container needs both ROS versions to be installed, and it is a little tedious to come up with one having both. We already had a pre-built Jammy Noetic container, which we again use it here. Be careful on naming again, it is hard-coded in the Dockerfile. First build the Dockerfile by:
+The only nuance is that this container needs both ROS versions to be installed, and it is a little tedious to come up with one having both. We already had a pre-built Jammy Noetic container, which we again use it here. The dockerfile will build everything you need and will prepare it to go. Be careful on the available container naming again, as this tutorial follows the parent's naming convention (i.e. `noetic-on-jammy-l4t:latest`). First build the Dockerfile by:
 ```bash
 docker build -t zed:ros_bridge -f Dockerfile.bridge .
 ```
