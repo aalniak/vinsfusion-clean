@@ -1,6 +1,6 @@
 # Merge to 22.04
 
-This branch is an attempt to migrate a ROS-Noetic based system onto Ubuntu 22.04, specifically on an ARM64 device (Nvidia Jetson AGX Orin series) with specifications:
+This branch is an attempt to migrate a ROS-Noetic based system onto Ubuntu 22.04, specifically on an ARM64 device (Nvidia Jetson AGX Orin series) with specifications:  
 Ubuntu Base: 22.04  
 JetPack Version: 6.2  
 L4T Version: 36.4.0  
