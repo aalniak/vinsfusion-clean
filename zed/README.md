@@ -10,7 +10,7 @@ cd zed-ros2-wrapper/docker
 ```
 Upon completion, your image repository:tag name is going to be used with the corresponding script. By default, it is dependent on script inputs, and is expected to be `zed_ros2_l4t_36.4.0_sdk_5.1.0:latest`. If there happens to be a difference, make sure to edit `zed.sh` to align it with your naming.
 
-In `zed.sh`, the last mount argument tries to mount zed ros2 wrapper, to get any changed config from there (it's a design choice, you may change the config in the container as well under src).
+In `zed.sh`, the last mount argument tries to mount zed ros2 wrapper, to get any changed config from there (it's a design choice, you may change the config in the container as well under src).  
 After considering these, and potentially double-checking `zed.sh` for your namings, you simply run:
 ```bash
 bash zed.sh
@@ -21,7 +21,7 @@ This one is straightforward, as we only need a ROS1-capable container. We do not
 ```bash
 bash master.sh
 ```
-After running, it detaches the roscore stuff for possible debug purposes with rostopic etc.
+After running, it detaches the roscore stuff for possible debug purposes with rostopic etc.  
 
 ## 3. ROS1_Bridge Container
 As our system works in Ubuntu 22.04 (Jammy), and ZED SDK does not have ROS1 support for Jammy, [ros1_bridge](https://github.com/ros2/ros1_bridge) is an absolute necessity. It simply receives messages in ROS2 convention and transforms them into ROS1 then propagate to the ROS1 master.
