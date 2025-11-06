@@ -1,34 +1,34 @@
 # Merge to 22.04
 
 This branch is an attempt to migrate a ROS-Noetic based system onto Ubuntu 22.04, specifically on an ARM64 device (Nvidia Jetson AGX Orin series) with specifications:
-Ubuntu Base: 22.04
-JetPack Version: 6.2
-L4T Version: 36.4.0
-CUDA: 12.6
+Ubuntu Base: 22.04  
+JetPack Version: 6.2  
+L4T Version: 36.4.0  
+CUDA: 12.6  
 
 ## 1. ROS-Noetic on Jammy
-In order to use ROS-Noetic on Ubuntu 22.04, one needs to build it from the source (as it is not officially supported). The Dockerfile now builds ROS-Noetic from the source, proving VINS-Fusion useful on Ubuntu 22.04 without porting to ROS2. One may simply build the image by **going into** the folder `./docker/` and executing this one line command:
+In order to use ROS-Noetic on Ubuntu 22.04, one needs to build it from the source (as it is not officially supported). The Dockerfile now builds ROS-Noetic from the source, proving VINS-Fusion useful on Ubuntu 22.04 without porting to ROS2. One may simply build the image by **going into** the folder `./docker/` and executing this one line command:  
 ```bash
 docker build -t noetic-on-jammy-l4t:latest -f Dockerfile ..
 ```
 
 ## 2. Running the Docker Container
-Upon coming back to the project folder it is relatively simple to run the docker container. It's a one liner command:
+Upon coming back to the project folder it is relatively simple to run the docker container. It's a one liner command:  
 ```bash
 bash docker/run.sh /first/folder/to/mount /second/folder/to/mount
 ```
-Notice that there are two folders to be mounted, which are arbitrary and depending on the application. One may change the reference to these folders in container by editing the following lines in `docker/run.sh`:
+Notice that there are two folders to be mounted, which are arbitrary and depending on the application. One may change the reference to these folders in container by editing the following lines in `docker/run.sh`:  
 ```bash
   -v "${HOST_DIR_1}:/datasets" \
   -v "${HOST_DIR_2}:/nvidia_home" \
 ```
-It is also worth noting that in `docker/run.sh`, there are specific lines coming from [jetson-containers](https://github.com/dusty-nv/jetson-containers) run commands, which are specific to jetson devices.
+It is also worth noting that in `docker/run.sh`, there are specific lines coming from [jetson-containers](https://github.com/dusty-nv/jetson-containers) run commands, which are specific to jetson devices.  
 
 ## 3. ZED Support
-Navigate to zed folder for extensive README.
+Navigate to zed folder for extensive README.  
 
 ##
-The rest of the workflow is parallel to the forked version, as can be seen just below. Good luck.
+The rest of the workflow is parallel to the forked version, as can be seen just below. Good luck.  
 
 # vinsfusion-clean
 
