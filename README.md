@@ -7,7 +7,7 @@ L4T Version: 36.4.0
 CUDA: 12.6  
 
 ## 1. ROS-Noetic on Jammy
-In order to use ROS-Noetic on Ubuntu 22.04, one needs to build it from the source as it is not officially supported. The new version of the Dockerfile builds ROS-Noetic from the source, proving VINS-Fusion useful on Ubuntu 22.04 without porting to ROS2. One may simply build the image by **going into** the folder `./docker/` and executing this one line command:  
+In order to use ROS-Noetic on Ubuntu 22.04, one needs to build it from the source as it is not officially supported. The new version of the Dockerfile builds ROS-Noetic from the source, proving VINS-Fusion useful on Ubuntu 22.04 without porting to ROS2. One may simply build the image by **going into** the folder `./docker` and executing this one line command:  
 ```bash
 docker build -t noetic-on-jammy-l4t:latest -f Dockerfile ..
 ```
