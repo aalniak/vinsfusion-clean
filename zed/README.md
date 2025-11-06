@@ -34,3 +34,9 @@ This will take some time. After build finishes, one may run the bridge with:
 ```bash
 bash bridge.sh
 ```
+##
+Once running all three, ROS1 master should be able to list zed topics with:
+```bash
+rostopic list
+```
+and the visible topics are directly usable in VINS-Fusion's configs.
