@@ -26,4 +26,5 @@ docker run --runtime=nvidia --rm \
             export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && \
             export ROS_LOCALHOST_ONLY=0 && \
             cp /zed_dyna/zed_wrapper/config/common_stereo.yaml ./src/zed_wrapper/config/common_stereo.yaml && \
+            cp /zed_dyna/zed_wrapper/config/zed2i.yaml ./src/zed_wrapper/config/zed2i.yaml && \
             ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2i"
