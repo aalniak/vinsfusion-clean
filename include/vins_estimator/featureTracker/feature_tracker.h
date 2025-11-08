@@ -18,7 +18,7 @@
 #include <execinfo.h>
 #include <vins_estimator/estimator/parameters.h>
 #include <vins_estimator/utility/tic_toc.h>
-
+#include <fstream>
 #include <csignal>
 #include <cstdio>
 #include <eigen3/Eigen/Dense>
