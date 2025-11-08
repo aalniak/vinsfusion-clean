@@ -16,7 +16,7 @@
 #include <numeric>
 #include <vector>
 using namespace std;
-
+#include <fstream>
 #include <eigen3/Eigen/Dense>
 using namespace Eigen;
 
