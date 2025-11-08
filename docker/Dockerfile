@@ -144,6 +144,6 @@ RUN bash -lc '\
 '
 
 RUN pip install torch
-RUN pip install --upgrade --force-reinstall "numpy<2,>=1.24"
+RUN pip install opencv-python "numpy<1.24"
 # Default to bash with ROS env on interactive shells
 CMD ["/bin/bash"]
