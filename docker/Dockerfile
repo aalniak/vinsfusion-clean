@@ -143,7 +143,9 @@ RUN bash -lc '\
   catkin config --cmake-args -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPython3_EXECUTABLE=/usr/bin/python3 \
 '
 
+# Copy your Jetson-friendly requirements into the image
+COPY docker/depth_requirements.txt /tmp/requirements.txt
+# Install them into the venv (VENV_PATH=/opt/venv from above)
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 RUN pip install torch
-RUN pip install opencv-python "numpy<1.24"
-# Default to bash with ROS env on interactive shells
 CMD ["/bin/bash"]
