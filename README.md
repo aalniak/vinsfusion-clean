@@ -81,7 +81,7 @@ For example,
 roslaunch vins vins.launch bag_path:=/bagfiles/MH_01_easy.bag config_path:=/root/catkin_ws/src/VINS-Fusion/config/euroc/euroc_mono_imu_config.yaml
 ```
 
-If you wish to work with cameras (in which case you will not be using bags), make sure you include the topics in config file. Then, simply and omit bag_path:= argument. A simple example:
+If you wish to work with cameras (in which case you will not be using bags), make sure you include the topics in config file. Then, simply omit bag_path:= argument. A simple example:
 ```bash
 roslaunch vins vins.launch config_path:=/root/catkin_ws/src/VINS-Fusion/config/euroc/euroc_mono_imu_config.yaml
 ```
