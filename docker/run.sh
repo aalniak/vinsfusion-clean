@@ -35,7 +35,7 @@ for i in {0..8}; do
     i2c_args+=( --device "/dev/i2c-$i" )
   fi
 done
-
+export XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
 # Compose docker run
 docker run \
   --runtime nvidia \
@@ -45,6 +45,7 @@ docker run \
   --shm-size "${SHM_SIZE}" \
   --rm -it \
   \
+  -e DISPLAY -e XAUTHORITY \
   -v /etc/localtime:/etc/localtime:ro \
   -v /etc/timezone:/etc/timezone:ro \
   \
