@@ -6,8 +6,8 @@ imu: 1
 num_of_cam: 1  
 
 imu_topic: "/zed/zed_node/imu/data"
-image0_topic: "/zed/zed_node/left/image_rect_color"
-image1_topic: "/zed/zed_node/right/image_rect_color"
+image0_topic: "/zed/zed_node/left/color/rect/image"
+image1_topic: "/zed/zed_node/right/color/rect/image"
 output_path: "/data/zed_output/"
 
 cam0_calib: "left.yaml"
