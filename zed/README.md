@@ -2,7 +2,7 @@
 In order to work with ZED cameras, three main containers are required:
 
 ## 1. ZED ROS2 Container
-ZED ROS2 wrapper shall be built from the [official zed-ros2-wrapper](https://github.com/stereolabs/zed-ros2-wrapper) repository, with the script under directory "docker" there by invoking the series of commands:
+ZED ROS2 wrapper has its own dependencies, where in our case it is only ZED SDK (we utilize version [ZED SDK 5.1.0](https://www.stereolabs.com/en-fr/developers/release#868673d43af5)). After dependencies are installed, the wrapper shall be built from the [official zed-ros2-wrapper](https://github.com/stereolabs/zed-ros2-wrapper) repository, with the script under directory "docker" there by invoking the series of commands:
 ```bash
 git clone https://github.com/stereolabs/zed-ros2-wrapper.git
 cd zed-ros2-wrapper/docker
