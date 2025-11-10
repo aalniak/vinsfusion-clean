@@ -72,4 +72,6 @@ docker run \
   -v "${HOST_DIR_1}:/datasets" \
   -v "${HOST_DIR_2}:/nvidia_home" \
   \
-  $IMAGE
+  $IMAGE \
+  /bin/bash -c \
+  "cd /root/catkin_ws/; source devel/setup.bash; bash"
