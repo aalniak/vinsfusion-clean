@@ -13,3 +13,5 @@ imagecorruptions
 torch
 torchvision
 torchaudio
+em<4
+PyYAML

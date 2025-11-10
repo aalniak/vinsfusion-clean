@@ -146,6 +146,8 @@ RUN bash -lc '\
 # Copy your Jetson-friendly requirements into the image
 COPY docker/depth_requirements.txt /tmp/requirements.txt
 # Install them into the venv (VENV_PATH=/opt/venv from above)
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
-RUN pip install torch
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
+    pip install torch && \
+    pip uninstall -y empy em && \
+    pip install catkin_pkg "empy<4" rospkg
 CMD ["/bin/bash"]
