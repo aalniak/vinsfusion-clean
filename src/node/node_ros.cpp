@@ -113,11 +113,13 @@ void sync_process(ros::ServiceClient& depth_client) {
       if (!image.empty()) {
           cv::Mat depth_image;
           vins::EstimateDepth srv;
+          std::cout << "Calling depth service for timestamp: " << time << std::endl;
           srv.request.input_image = *img_msg_ptr; //original message goes in
+          
 
           if (depth_client.call(srv)) {
               // We got a response
-              ROS_DEBUG("Successfully received depth map!");
+              std::cout << "Successfully received depth map for timestamp: " << time << std::endl;
               try {
                   // Convert the 32FC1 ROS message back to an OpenCV Mat
                   cv_bridge::CvImageConstPtr cv_ptr;
@@ -130,6 +132,7 @@ void sync_process(ros::ServiceClient& depth_client) {
               ROS_ERROR("Failed to call depth service. Is the python node running?");
               // Decide how to handle failure: continue, return, or send empty Mat
           }
+          std::cout << "Inputting image and depth to estimator at timestamp: " << time << std::endl;
           estimator->inputImage(time, image, depth_image);
       }
     }
