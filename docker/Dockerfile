@@ -145,5 +145,6 @@ RUN bash -lc '\
 
 RUN pip install torch
 RUN pip install --upgrade --force-reinstall "numpy<2,>=1.24"
+RUN pip install catkin_pkg
 # Default to bash with ROS env on interactive shells
 CMD ["/bin/bash"]
