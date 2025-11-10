@@ -59,6 +59,7 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   nav_msgs
   tf
+  sensor_msgs
   cv_bridge
   image_transport
   message_generation
