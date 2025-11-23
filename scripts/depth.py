@@ -141,7 +141,7 @@ class DepthService:
         if not os.path.isabs(self.model_path):
             rospy.logwarn(f"Model path '{self.model_path}' is not absolute. This might fail.")
         
-        self.input_size = rospy.get_param("~input_size", 518)
+        self.input_size = rospy.get_param("~input_size", 210)
         cli_device = rospy.get_param("~device", None)  # e.g., "cuda:0" or "cpu"
         
         # --- 2. Load Model (from your run_inference_single) ---
