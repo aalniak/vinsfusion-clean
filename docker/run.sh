@@ -19,7 +19,7 @@ for d in "$HOST_DIR_1" "$HOST_DIR_2"; do
 done
 
 # Defaults (override via env if you want)
-IMAGE=noetic-on-jammy-l4t:latest
+IMAGE=ros:vins-depth-trt
 NAME="${NAME:-jetson_container_$(date +%Y%m%d_%H%M%S)}"
 SHM_SIZE="${SHM_SIZE:-8g}"
 
@@ -35,13 +35,16 @@ for i in {0..8}; do
     i2c_args+=( --device "/dev/i2c-$i" )
   fi
 done
-
+#xhost +local:root
 # Compose docker run
 docker run \
   --runtime nvidia \
   --env NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
   --env PULSE_SERVER="${PULSE_SOCK}" \
   --network host \
+  --privileged \
+  --env="DISPLAY" \
+  --env="QT_X11_NO_MITSHM=1" \
   --shm-size "${SHM_SIZE}" \
   --rm -it \
   \
