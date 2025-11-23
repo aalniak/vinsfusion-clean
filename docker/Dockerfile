@@ -1,7 +1,7 @@
 #FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
-#Image below is acquired by jetson-containers build with pytorch tag, image with ONNX layer specifically (for future possible use)
-FROM pytorch:r36.4.tegra-aarch64-cu126-22.04-onnx
-
+#Image below is acquired by jetson-containers build with pytorch tag, with following command:
+#jetson-containers build l4t-pytorch --skip-packages torch2trt
+FROM l4t-pytorch:r36.4.tegra-aarch64-cu126-22.04
 
 SHELL ["/bin/bash", "-lc"]
 
@@ -143,11 +143,34 @@ RUN bash -lc '\
   catkin config --cmake-args -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPython3_EXECUTABLE=/usr/bin/python3 \
 '
 
-# Copy your Jetson-friendly requirements into the image
+# Copy our Jetson-friendly requirements into the image
 COPY docker/depth_requirements.txt /tmp/requirements.txt
 # Install them into the venv (VENV_PATH=/opt/venv from above)
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
     pip install torch && \
     pip uninstall -y empy em && \
     pip install catkin_pkg "empy<4" rospkg
+
+# Install tensorrt and torch2trt externally
+RUN apt-get update && apt-get install -y gnupg wget && \
+    wget -qO - https://repo.download.nvidia.com/jetson/jetson-ota-public.asc | gpg --dearmor -o /usr/share/keyrings/nvidia-l4t-apt-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-l4t-apt-keyring.gpg] https://repo.download.nvidia.com/jetson/common r36.4 main" > /etc/apt/sources.list.d/nvidia-l4t.list && \
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-l4t-apt-keyring.gpg] https://repo.download.nvidia.com/jetson/t234 r36.4 main" >> /etc/apt/sources.list.d/nvidia-l4t.list
+
+RUN apt-get update && \
+    apt-get install -y python3-libnvinfer && \
+    # Search /usr/lib for the 'tensorrt' folder and copy it to venv
+    find /usr/lib -type d -name "tensorrt" -exec cp -r {} /opt/venv/lib/python3.10/site-packages/ \; && \
+    # Search for the egg-info metadata and copy it to venv (required for pip to see it)
+    find /usr/lib -name "tensorrt-*.egg-info" -exec cp -r {} /opt/venv/lib/python3.10/site-packages/ \; || true && \
+    rm -rf /var/lib/apt/lists/*
+    
+#RUN git clone https://github.com/NVIDIA-AI-IOT/torch2trt && \
+#    cd torch2trt && \
+#    echo "/usr/lib/python3/dist-packages" > /opt/venv/lib/python3.10/site-packages/trt_link.pth && \
+#    python3 -m pip install . --no-build-isolation && \
+#    cd .. && \
+#    rm -rf torch2trt
+
+WORKDIR /root/catkin_ws
 CMD ["/bin/bash"]
