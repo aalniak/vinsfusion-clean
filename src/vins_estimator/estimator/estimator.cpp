@@ -161,7 +161,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
   inputImageCnt++;
   
   // A visualization to debug
-  if (!depth_img.empty())
+  if (!depth_img.empty() && (inputImageCnt%2==0))
   {
       std::cout << "Depth image acquired successfully!" << std::endl;
       // Normalize the 32FC1 float image to 0-255 (8UC1)
