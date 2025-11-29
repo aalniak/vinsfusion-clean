@@ -52,6 +52,10 @@ if (USE_CUDA)
   endif()
 endif()
 
+find_package(CUDA REQUIRED)
+find_library(TENSORRT_LIB nvinfer)
+find_library(CUDART_LIB cudart)
+
 ## Find required packages
 find_package(catkin REQUIRED COMPONENTS
   roscpp
@@ -76,6 +80,8 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
   ${CERES_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
+  ${CUDA_INCLUDE_DIRS}
+  /usr/local/cuda/include
 )
 
 ## Map Ceres and Eigen3 variables for catkin_package
@@ -118,6 +124,7 @@ catkin_package(
 add_executable(
   vins_node
   src/node/node_ros.cpp
+  src/vins_estimator/estimator/DepthInfer.cpp
   src/vins_estimator/estimator/parameters.cpp
   src/vins_estimator/estimator/estimator.cpp
   src/vins_estimator/estimator/feature_manager.cpp
@@ -149,6 +156,9 @@ target_link_libraries(vins_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
+  ${CUDA_LIBRARIES}
+  nvinfer
+  cudart
 )
 
 add_executable(
