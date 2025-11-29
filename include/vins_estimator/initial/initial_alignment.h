@@ -40,6 +40,7 @@ class ImageFrame {
   Vector3d T;
   IntegrationBase *pre_integration;
   bool is_key_frame;
+  cv::Mat depth_map;
 };
 void solveGyroscopeBias(map<double, ImageFrame> &all_image_frame,
                         Vector3d *Bgs);

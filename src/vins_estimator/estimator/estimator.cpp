@@ -13,7 +13,7 @@
 #include <vins_estimator/utility/visualization.h>
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/highgui.hpp> // For debug purposes
+#include <opencv2/highgui.hpp> // For debug purposes.
 
 #include <cassert>
 #include <cstddef>
@@ -27,6 +27,9 @@ Estimator::Estimator(Parameters &params)
       initial_ex_rotation{params} {
   ROS_INFO("init begins");
   clearState();
+  std::string engine_path = "/depth/depth_anything_ac_16.engine";
+  depthInferer = std::make_shared<DepthInfer>(engine_path);
+  std::cout << "Engine is loaded" << std::endl;
 }
 
 Estimator::~Estimator() {
@@ -159,7 +162,22 @@ void Estimator::changeSensorType(int use_imu, int use_stereo) {
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_img, 
                            const cv::Mat &_img1) {
   inputImageCnt++;
-  
+  mCache.lock();
+  // VINS often uses mono images. Ensure we have 3 channels for Depth Anything
+  cv::Mat rgb_img;
+  if (_img.channels() == 1) {
+      cv::cvtColor(_img, rgb_img, cv::COLOR_GRAY2RGB);
+  } else {
+      rgb_img = _img.clone();
+  }
+  image_cache[t] = rgb_img;
+    
+    // Cleanup old cache (keep last 2s buffer) to prevent memory leaks
+  for(auto it = image_cache.begin(); it != image_cache.end(); ) {
+      if(it->first < t - 2.0) it = image_cache.erase(it);
+      else ++it;
+  }
+  mCache.unlock();
   // A visualization to debug
   if (!depth_img.empty() && (inputImageCnt%2==0))
   {
@@ -430,18 +448,16 @@ void Estimator::processImage(
     marginalization_flag = MARGIN_SECOND_NEW;
     // printf("non-keyframe\n");
   }
-
   // save the feature points to feature_debug_path
   if (params.feature_debug) {
     vins::estimator::FeatureManager::logFeature(image,
                                                 params.feature_debug_path);
   }
-
+  cv::Mat current_depth;
   ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
   ROS_DEBUG("Solving %d", frame_count);
   ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
   Headers[frame_count] = header;
-
   ImageFrame imageframe(image, header);
   imageframe.pre_integration = tmp_pre_integration;
   all_image_frame.insert(make_pair(header, imageframe));
@@ -449,7 +465,50 @@ void Estimator::processImage(
       acc_0,        gyr_0,        Bas[frame_count], Bgs[frame_count],
       params.acc_n, params.gyr_n, params.acc_w,     params.gyr_w,
       params.g};
+  if (marginalization_flag == MARGIN_OLD) {
+        std::cout << "It's a keyframe, lets get the depth!" << std::endl;
+        // 1. Retrieve the image from our cache
+        cv::Mat raw_img;
+        bool found = false;
 
+        mCache.lock();
+        if (image_cache.count(header)) {
+            raw_img = image_cache[header];
+            found = true;
+            // Remove it from cache to save ram,
+            image_cache.erase(header);
+            // Maybe use for loop closure later?
+        }
+        mCache.unlock();
+
+        // 2. Run Inference
+        if (found) {
+        // 1. Run Inference (Returns 518x518)
+        cv::Mat raw_depth_518 = depthInferer->infer(raw_img);
+
+        // 2. Resize to match VINS frame (1280x720)
+        // VINS expects features coordinates in the original resolution
+        cv::resize(raw_depth_518, current_depth, cv::Size(1280, 720));
+
+        // --- DEBUG BLOCK START ---
+        double minVal, maxVal;
+        cv::minMaxLoc(current_depth, &minVal, &maxVal);
+        cv::Scalar avgVal = cv::mean(current_depth);
+
+        ROS_INFO_STREAM("Depth Debug:"
+            << " Size=" << current_depth.cols << "x" << current_depth.rows
+            << " | Type=" << current_depth.type()  // Should be 5 (CV_32FC1)
+            << " | Min=" << minVal
+            << " | Max=" << maxVal
+            << " | Avg=" << avgVal[0]);
+        // --- DEBUG BLOCK END ---
+        } else {
+            ROS_WARN("Keyframe image not found in cache! Timestamp mismatch?");
+        }
+    }
+  if (!current_depth.empty()) {
+        imageframe.depth_map = current_depth.clone();
+    }
   if (params.estimate_extrinsic == 2) {
     ROS_INFO("calibrating extrinsic param, rotation movement is needed");
     if (frame_count != 0) {
@@ -994,6 +1053,7 @@ bool Estimator::failureDetection() {
 }
 
 void Estimator::optimization() {
+  std::cout << "Optimization kicks in!" << std::endl;
   TicToc t_whole;
   TicToc t_prepare;
   vector2double();

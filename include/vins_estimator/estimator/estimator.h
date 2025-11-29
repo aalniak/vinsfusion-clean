@@ -29,7 +29,7 @@
 #include <vins_estimator/initial/solve_5pts.h>
 #include <vins_estimator/utility/tic_toc.h>
 #include <vins_estimator/utility/utility.h>
-
+#include "vins_estimator/estimator/DepthInfer.h"
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 #include <mutex>
@@ -94,7 +94,9 @@ class Estimator {
   enum SolverFlag { INITIAL, NON_LINEAR };
 
   enum MarginalizationFlag { MARGIN_OLD = 0, MARGIN_SECOND_NEW = 1 };
-
+  std::shared_ptr<DepthInfer> depthInferer;
+  std::map<double, cv::Mat> image_cache;
+  std::mutex mCache;
   Parameters &params;
 
   std::mutex mProcess;
