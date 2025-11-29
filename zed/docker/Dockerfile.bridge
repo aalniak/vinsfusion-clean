@@ -1,0 +1,75 @@
+# Bridge image: build ros1_bridge on Jammy using your existing ROS1 Noetic + L4T base
+FROM noetic-on-jammy-l4t:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+# --- Tools & Python tooling
+RUN apt-get update && apt-get install -y \
+    curl gnupg2 lsb-release locales \
+    build-essential cmake git \
+    python3-pip python3-argcomplete \
+    python3-colcon-common-extensions \
+    python3-rosdep python3-rosdistro python3-rospkg python3-empy python3-catkin-pkg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN locale-gen en_US en_US.UTF-8 && update-locale
+
+# --- Add ROS 2 Humble repo (Jammy)
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+  | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg && \
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+http://packages.ros.org/ros2/ubuntu $(lsb_release -sc) main" \
+  > /etc/apt/sources.list.d/ros2.list
+
+# --- Install minimal ROS 2 + common message packages used by bridges
+RUN apt-get update && apt-get install -y \
+    ros-humble-ros-base \
+    ros-humble-rmw-fastrtps-cpp \
+    ros-humble-std-msgs \
+    ros-humble-sensor-msgs \
+    ros-humble-geometry-msgs \
+    ros-humble-tf2-msgs \
+    ros-humble-rosgraph-msgs \
+    python3-lark \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Pin Empy to 3.x for Humble (Empy 4 breaks rosidl_cmake); also ensure lark etc.
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    python3 -m pip uninstall -y empy || true && \
+    python3 -m pip install --no-cache-dir "empy==3.3.4" lark catkin_pkg rospkg rosdep rosdistro colcon-common-extensions
+
+# If the base image has a venv (your logs showed /opt/venv), mirror the deps there too.
+RUN if [ -x /opt/venv/bin/python ]; then \
+      /opt/venv/bin/python -m pip install --no-cache-dir --upgrade pip && \
+      /opt/venv/bin/python -m pip uninstall -y empy || true && \
+      /opt/venv/bin/python -m pip install --no-cache-dir "empy==3.3.4" lark catkin_pkg rospkg rosdep rosdistro colcon-common-extensions; \
+    fi
+
+SHELL ["/bin/bash","-lc"]
+
+# --- Fetch ros1_bridge (default branch)
+RUN mkdir -p /bridge_ws/src && cd /bridge_ws/src && \
+    git clone https://github.com/ros2/ros1_bridge.git
+
+# Prefer system Python for ament (we also installed into /opt/venv as fallback)
+ENV AMENT_PYTHON_EXECUTABLE=/usr/bin/python3
+
+# --- Build ros1_bridge with BOTH ROS envs sourced
+# The ROS_DISTRO mix warning is expected; harmless.
+RUN source /opt/ros/noetic/setup.bash && source /opt/ros/humble/setup.bash && \
+    cd /bridge_ws && colcon build --packages-select ros1_bridge
+
+# Convenience for interactive shells
+RUN echo "source /opt/ros/noetic/setup.bash"  >> /etc/bash.bashrc && \
+    echo "source /opt/ros/humble/setup.bash"  >> /etc/bash.bashrc && \
+    echo "source /bridge_ws/install/setup.bash" >> /etc/bash.bashrc
+
+# Runtime defaults
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ENV ROS_LOCALHOST_ONLY=0
+WORKDIR /bridge_ws
+
+# Default: run the dynamic bridge
+CMD ["bash","-lc","source /opt/ros/noetic/setup.bash && source /opt/ros/humble/setup.bash && source /bridge_ws/install/setup.bash && ros2 run ros1_bridge dynamic_bridge --bridge-all-topics"]

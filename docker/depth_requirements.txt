@@ -1,0 +1,17 @@
+numpy<1.24.0
+Pillow
+matplotlib
+scikit-image
+scikit-learn
+pandas
+scipy
+tqdm
+PyYAML
+tensorboardX
+h5py
+imagecorruptions
+torch
+torchvision
+torchaudio
+em<4
+PyYAML

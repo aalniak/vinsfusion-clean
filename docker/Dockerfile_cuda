@@ -1,0 +1,124 @@
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu20.04
+
+# Set environment variables
+ENV TERM xterm
+ENV PYTHONIOENCODING UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies for ROS
+RUN apt-get update && \
+    apt-get install -y \
+    lsb-release \
+    gnupg2 \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Setup ROS Noetic repository
+RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
+
+# Set up keys
+RUN curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add -
+
+# Update and install ROS Noetic full desktop
+RUN apt-get update && \
+    apt-get install -y ros-noetic-desktop && \
+    rm -rf /var/lib/apt/lists/*
+
+# Environment setup
+RUN echo "source /opt/ros/noetic/setup.bash" >> /root/.bashrc
+
+# Install rosinstall tools
+RUN apt-get update && \
+    apt-get install -y python3-rosinstall python3-rosinstall-generator python3-wstool build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set ROS environment variables (optional)
+ENV ROS_DISTRO noetic
+ENV ROS_ROOT /opt/ros/noetic
+ENV ROS_PACKAGE_PATH /opt/ros/noetic/share
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+      --allow-unauthenticated \
+      cmake \
+      libatlas-base-dev \
+      libeigen3-dev \
+      libgoogle-glog-dev \
+      libsuitesparse-dev \
+      python3-catkin-tools \
+      ros-noetic-rviz \
+      ros-noetic-cv-bridge \
+      ros-noetic-image-transport \
+      ros-noetic-message-filters \
+      ros-noetic-tf && \
+      rm -rf /var/lib/apt/lists/*
+
+# Install Ceres
+RUN apt-get update && apt-get install -y \
+      --allow-unauthenticated \
+      git \
+      build-essential \
+      cmake \
+      libatlas-base-dev \
+      libeigen3-dev \
+      libgoogle-glog-dev \
+      libsuitesparse-dev && \
+      rm -rf /var/lib/apt/lists/*
+
+WORKDIR /
+RUN git clone --depth 1 --branch 2.2.0 https://ceres-solver.googlesource.com/ceres-solver
+WORKDIR /ceres-solver
+RUN mkdir build \
+    && cd build \
+    && cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCERES_ENABLE_CUDA=OFF \
+    -DBUILD_TESTING=OFF \
+    -DBUILD_EXAMPLES=OFF \
+    && make -j8 \
+    && make test \
+    && make install
+WORKDIR /
+
+# Set workspace
+RUN mkdir -p /root/catkin_ws
+WORKDIR /root/catkin_ws
+
+# Install helper tools
+RUN apt-get update && \
+    apt-get install -y tmux && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install format and lint tools
+RUN apt-get update && \
+    apt-get install -y \
+      clang-format-18 \
+      clang-tidy-18 \
+      clangd-18 && \
+      rm -rf /var/lib/apt/lists/*
+
+# Set clang-format and clang-tidy alternatives
+RUN update-alternatives --install \
+    /usr/bin/clang-format \
+    clang-format \
+    /usr/bin/clang-format-18 100
+
+RUN update-alternatives --install \
+    /usr/bin/clang-tidy \
+    clang-tidy \
+    /usr/bin/clang-tidy-18 100
+
+RUN update-alternatives --install \
+    /usr/bin/run-clang-tidy \
+    run-clang-tidy \
+    /usr/bin/run-clang-tidy-18 100
+
+RUN update-alternatives --install \
+    /usr/bin/clang-apply-replacements \
+    clang-apply-replacements \
+    /usr/bin/clang-apply-replacements-18 100
+
+RUN update-alternatives --install \
+    /usr/bin/clangd \
+    clangd \
+    /usr/bin/clangd-18 100

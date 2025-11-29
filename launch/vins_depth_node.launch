@@ -1,0 +1,13 @@
+<launch>
+  <node pkg="vins" type="depth_node.py" name="depth_anything_node" output="screen">
+    <!-- Adjust these to your setup -->
+    <param name="model_path" value="/depth/checkpoints/depth_anything_AC_vits.pth" />
+    <param name="encoder"    value="vits" />
+    <param name="input_size" value="320" />
+    <param name="device"     value="cuda:0" />
+
+    <!-- Topics -->
+    <param name="input_topic"  value="/zed/zed_node/left/image_rect_color" />
+    <param name="output_topic" value="/mde/depth" />
+  </node>
+</launch>

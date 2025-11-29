@@ -1,0 +1,75 @@
+<launch>
+    <!-- ======================
+         Arguments
+         ====================== -->
+    <arg name="config_path" default="$(find vins)/config/euroc/euroc_mono_imu_config.yaml" />
+    <arg name="bag_path"    default="/path/to/your/YOUR_DATASET_FOLDER/MH_01_easy.bag" />
+    <arg name="nowait"      default="false" />
+    <arg name="rviz"        default="true" />
+
+    <!-- DepthAnything model checkpoint -->
+    <arg name="model_path"  default="/depth/checkpoints/depth_anything_AC_vits.pth" />
+
+    <!-- ======================
+         RViz
+         ====================== -->
+    <node name="rvizvisualisation"
+          pkg="rviz"
+          type="rviz"
+          output="log"
+          args="-d $(find vins)/config/vins_rviz_config.rviz"
+          if="$(arg rviz)" />
+
+    <!-- ======================
+         VINS-Fusion Nodes
+         ====================== -->
+    <node name="vins_estimator"
+          pkg="vins"
+          type="vins_node"
+          output="screen"
+          required="true">
+        <param name="config_path" value="$(arg config_path)" />
+    </node>
+
+    <node name="loop_fusion"
+          pkg="vins"
+          type="loop_fusion_node"
+          output="screen">
+        <param name="config_path" value="$(arg config_path)" />
+    </node>
+
+    <!-- ======================
+         Async DepthAnything Node
+         (replaces depth_server_node service)
+         ====================== -->
+    <node name="depth_anything_node"
+          pkg="vins"
+          type="depth_node.py"
+          output="screen">
+        <!-- Keep your workaround for OpenMP on Jetson -->
+        <env name="LD_PRELOAD" value="/usr/lib/aarch64-linux-gnu/libgomp.so.1" />
+
+        <!-- Model + encoder settings -->
+        <param name="model_path"  value="$(arg model_path)" />
+        <param name="encoder"     value="vits" />
+        <param name="input_size"  value="320" />
+        <param name="device"      value="cuda" />
+
+        <!-- Topics:
+             For EuRoC bag replay: usually /cam0/image_raw
+             Change this to your ZED topic when using the real camera
+        -->
+        <param name="input_topic"  value="/zed/zed_node/left/color/rect/image" />
+        <param name="output_topic" value="/mde/depth" />
+    </node>
+
+    <!-- ======================
+         Rosbag Playback
+         ====================== -->
+    <node name="rosbag_play"
+          pkg="rosbag"
+          type="play"
+          output="screen"
+          args="$(arg bag_path)"
+          required="$(arg nowait)" />
+</launch>
