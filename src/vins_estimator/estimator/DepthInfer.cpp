@@ -32,7 +32,29 @@ DepthInfer::DepthInfer(std::string engine_path) {
 
     engine = runtime->deserializeCudaEngine(trtModelStream, size);
     if (!engine) std::cerr << "Failed to deserialize Engine!" << std::endl;
+    std::cout << "\n========== TRT ENGINE TENSORS (New API) ==========" << std::endl;
+    int nbIOTensors = engine->getNbIOTensors();
+    
+    for (int i = 0; i < nbIOTensors; i++) {
+        const char* name = engine->getIOTensorName(i);
+        nvinfer1::Dims dims = engine->getTensorShape(name);
+        nvinfer1::DataType dtype = engine->getTensorDataType(name);
+        nvinfer1::TensorIOMode ioMode = engine->getTensorIOMode(name);
+        bool isInput = (ioMode == nvinfer1::TensorIOMode::kINPUT);
+        
+        std::cout << "Index " << i << " Name: [" << name << "] " 
+                  << (isInput ? "INPUT" : "OUTPUT") << " | ";
+        
+        std::cout << "Type: " << (dtype == nvinfer1::DataType::kFLOAT ? "FP32" : 
+                                  dtype == nvinfer1::DataType::kHALF ? "FP16" : "Other") << " | ";
 
+        std::cout << "Dims: [";
+        for (int d = 0; d < dims.nbDims; d++) {
+            std::cout << dims.d[d] << (d < dims.nbDims - 1 ? "x" : "");
+        }
+        std::cout << "]" << std::endl;
+    }
+    std::cout << "==================================================\n" << std::endl;
     context = engine->createExecutionContext();
     delete[] trtModelStream;
 
@@ -55,13 +77,18 @@ DepthInfer::~DepthInfer() {
     if(engine) delete engine;
     if(runtime) delete runtime;
 }
-
+static bool first_run = true;
 cv::Mat DepthInfer::infer(cv::Mat& img) {
     if (!context) {
         std::cerr << "Inference skipped: Context not initialized." << std::endl;
         return cv::Mat();
     }
-
+    
+    if (first_run) {
+        std::cout << "\n[DepthInfer] COMPILED Dimensions: " << INPUT_W << "x" << INPUT_H << std::endl;
+        std::cout << "[DepthInfer] Memory Buffer Size: " << INPUT_SIZE << " floats" << std::endl;
+        first_run = false;
+    }
     // --- PREPROCESS ---
     cv::Mat resized, float_img;
     cv::resize(img, resized, cv::Size(INPUT_W, INPUT_H));
@@ -97,7 +124,7 @@ cv::Mat DepthInfer::infer(cv::Mat& img) {
 
     // --- POSTPROCESS ---
     // Wrap buffer in Mat
-    cv::Mat depth_map(INPUT_H, INPUT_W, CV_32FC1, cpu_output_buffer);
+    cv::Mat depth_map(OUTPUT_H, OUTPUT_W, CV_32FC1, cpu_output_buffer);
     
     // Return a deep copy so we can reuse the buffer next time
     return depth_map.clone(); 

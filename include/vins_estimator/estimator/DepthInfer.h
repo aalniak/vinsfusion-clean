@@ -19,9 +19,11 @@ private:
     void* buffers[2]; // 0: Input, 1: Output
     float* cpu_output_buffer = nullptr;
     
-    // Hardcoded for Depth Anything V2 Small
+    // Hardcoded for Depth Anything AC Small
     const int INPUT_W = 518;
     const int INPUT_H = 518;
     const int INPUT_SIZE = 3 * 518 * 518;
-    const int OUTPUT_SIZE = 1 * 518 * 518; 
+    const int OUTPUT_W = 296;
+    const int OUTPUT_H = 296;
+    const int OUTPUT_SIZE = 1 * 296 * 296;
 };
