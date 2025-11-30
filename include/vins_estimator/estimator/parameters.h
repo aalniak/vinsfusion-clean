@@ -78,7 +78,7 @@ struct Parameters {
 
   int feature_debug;
   std::string feature_debug_path;
-
+  bool use_depth;
   LossType loss_type;
   double loss_parameter;
   LossType loss_type_initial;

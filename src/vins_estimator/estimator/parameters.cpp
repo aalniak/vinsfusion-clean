@@ -166,6 +166,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   }
 
   fsSettings["pose_graph_save_path"] >> pose_graph_save_path;
+  fsSettings["use_depth"] >> use_depth;
   save_image = fsSettings["save_image"];
   load_previous_pose_graph = fsSettings["load_previous_pose_graph"];
 
