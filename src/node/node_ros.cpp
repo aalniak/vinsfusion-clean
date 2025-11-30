@@ -23,7 +23,6 @@
 #include <queue>
 #include <thread>
 #include <functional>
-#include "vins/EstimateDepth.h"
 
 using namespace vins::estimator;
 
