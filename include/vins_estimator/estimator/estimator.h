@@ -166,7 +166,10 @@ class Estimator {
   double para_Retrive_Pose[SIZE_POSE];
   double para_Td[1][1];
   double para_Tr[1][1];
-
+  int numbers[WINDOW_SIZE + 1];
+  double para_ScaleShift[WINDOW_SIZE + 1][2];
+  double depth_net_scales[WINDOW_SIZE + 1];
+  double depth_net_shifts[WINDOW_SIZE + 1];
   MarginalizationInfo *last_marginalization_info = nullptr;
   vector<double *> last_marginalization_parameter_blocks;
 

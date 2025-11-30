@@ -19,6 +19,49 @@
 #include <cstddef>
 
 namespace vins::estimator {
+// ------- Depth factor declaration ------- 
+struct VioDisparityModelFactor
+{
+    // The measurement from the network is a standard metric DEPTH value.
+    const double depth_network;
+    const double sqrt_info;
+
+    VioDisparityModelFactor(double depth_net, double weight)
+        : depth_network(depth_net), sqrt_info(weight) {}
+
+    template <typename T>
+    bool operator()(const T* const inv_depth_vio,      
+                    const T* const scale_shift_prime,   
+                    T* residuals) const
+    {
+        if (depth_network <= 1e-6) {
+            residuals[0] = T(0.0);
+            return true;
+        }
+
+        const T rho_net = T(depth_network); // inv depth from network
+
+        const T& rho_vio = inv_depth_vio[0]; // inv depth from vins
+
+
+        
+        const T& s_prime = scale_shift_prime[0]; // scale on rho
+        const T& b_prime = scale_shift_prime[1]; // shift on rho
+
+        T rho_net_corrected = s_prime * rho_net + b_prime;
+
+        residuals[0] = T(sqrt_info) * (rho_vio - rho_net_corrected);
+        //std::cout << "The metric residual for this very feature with vins depth "<< (T(1.0) / rho_vio) << " and aligned depth " << (T(1.0) / rho_net_corrected) << "is: " << (T(1.0) / rho_vio) - (T(1.0) / rho_net_corrected) << std::endl;
+        return true;
+    }
+
+    // The create function takes depth_net and instantiates the factor.
+    static ceres::CostFunction* Create(double depth_net, double weight) {
+        return (new ceres::AutoDiffCostFunction<VioDisparityModelFactor, 1, 1, 2>(
+            new VioDisparityModelFactor(depth_net, weight)));
+    }
+};
+// ----------------------------------------------- 
 
 Estimator::Estimator(Parameters &params)
     : f_manager{params},
@@ -49,7 +92,15 @@ void Estimator::clearState() {
   while (!accBuf.empty()) accBuf.pop();
   while (!gyrBuf.empty()) gyrBuf.pop();
   while (!featureBuf.empty()) featureBuf.pop();
-
+  
+  // ------- Depth scale&shift variable allocation ------- 
+  for (int i = 0; i < WINDOW_SIZE + 1; i++)
+  {
+    depth_net_scales[i] = 1.0;
+    depth_net_shifts[i] = 0.0;
+  }
+  //  -----------------------------------------------------
+  
   prevTime = -1;
   curTime = 0;
   openExEstimation = false;
@@ -162,6 +213,7 @@ void Estimator::changeSensorType(int use_imu, int use_stereo) {
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_img, 
                            const cv::Mat &_img1) {
   inputImageCnt++;
+  std::cout << "[Input] Image dims: " << _img.cols << "x" << _img.rows << std::endl;
   mCache.lock();
   // VINS often uses mono images. Ensure we have 3 channels for Depth Anything
   cv::Mat rgb_img;
@@ -174,32 +226,11 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
     
     // Cleanup old cache (keep last 2s buffer) to prevent memory leaks
   for(auto it = image_cache.begin(); it != image_cache.end(); ) {
-      if(it->first < t - 2.0) it = image_cache.erase(it);
+      if(it->first < t - 4.0) it = image_cache.erase(it);
       else ++it;
   }
   mCache.unlock();
-  // A visualization to debug
-  if (!depth_img.empty() && (inputImageCnt%2==0))
-  {
-      std::cout << "Depth image acquired successfully!" << std::endl;
-      // Normalize the 32FC1 float image to 0-255 (8UC1)
-      cv::Mat viz_depth;
-      cv::normalize(depth_img, viz_depth, 0, 255, cv::NORM_MINMAX, CV_8UC1);
-
-      // Apply a colormap (same as your Python script)
-      cv::Mat color_depth;
-      cv::applyColorMap(viz_depth, color_depth, cv::COLORMAP_INFERNO);
-
-      // Show the image in a window
-      //cv::imshow("Depth Map", color_depth);
-      //
-      //// We can also show the original RGB image to compare
-      //cv::imshow("Input Image", _img);
-      
-      // 4. IMPORTANT: Wait 1ms for OpenCV to process GUI events
-      cv::waitKey(1);
-  }
-  // --- NEW VISUALIZATION CODE END ---
+  
 
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
   TicToc featureTrackerTime;
@@ -457,38 +488,116 @@ void Estimator::processImage(
   ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
   ROS_DEBUG("Solving %d", frame_count);
   ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
-  Headers[frame_count] = header;
-  ImageFrame imageframe(image, header);
-  imageframe.pre_integration = tmp_pre_integration;
-  all_image_frame.insert(make_pair(header, imageframe));
-  tmp_pre_integration = new IntegrationBase{
-      acc_0,        gyr_0,        Bas[frame_count], Bgs[frame_count],
-      params.acc_n, params.gyr_n, params.acc_w,     params.gyr_w,
-      params.g};
   if (marginalization_flag == MARGIN_OLD) {
-        std::cout << "It's a keyframe, lets get the depth!" << std::endl;
+        std::cout << header << " is a keyframe, lets get the depth!" << std::endl;
         // 1. Retrieve the image from our cache
         cv::Mat raw_img;
         bool found = false;
 
-        mCache.lock();
-        if (image_cache.count(header)) {
-            raw_img = image_cache[header];
-            found = true;
-            // Remove it from cache to save ram,
-            image_cache.erase(header);
-            // Maybe use for loop closure later?
-        }
-        mCache.unlock();
+        //mCache.lock();
+        //auto it = image_cache.lower_bound(header - 0.001); 
+        //
+        //if (it != image_cache.end() && std::abs(it->first - header) < 0.001) {
+        //    // Found a match within 1ms tolerance
+        //    raw_img = it->second;
+        //    found = true;
+        //    // But if you do erase, make sure you erase the iterator, not the double key
+        //    image_cache.erase(it); 
+        //}
+        //mCache.unlock();
 
+        mCache.lock(); // Lock once for the batch operation
+
+        // Iterate through the active VINS window (Indices 0 to WINDOW_SIZE-1)
+        // We skip WINDOW_SIZE (Index 10) because it's volatile.
+        for (int i = 0; i < WINDOW_SIZE-1; i++) {
+
+            double ts = Headers[i];
+
+            // 1. Check if this frame exists in our map
+            if (all_image_frame.find(ts) == all_image_frame.end()) continue;
+
+            ImageFrame &frame = all_image_frame.at(ts);
+        
+            // 2. If it has no depth, it needs it NOW (it has survived long enough)
+            if (frame.depth_map.empty()) {
+
+                // 3. Check if we still have the raw image in cache
+                if (image_cache.count(ts)) {
+                    ROS_INFO("Lazy Inference: Backfilling depth for Frame %.6f (Index %d)", ts, i);
+
+                    cv::Mat raw_img = image_cache[ts];
+
+                    // Run Inference (Consider releasing lock if infer is slow, but be careful of race conditions)
+                    // depthInferer->infer is likely thread-safe or blocking, usually safer to unlock during heavy compute
+                    mCache.unlock(); 
+                    cv::Mat raw_depth_518 = depthInferer->infer(raw_img);
+                    mCache.lock();
+
+                    cv::Mat resized_depth;
+                    cv::resize(raw_depth_518, resized_depth, cv::Size(1280, 800));
+
+                    frame.depth_map = resized_depth.clone();
+
+                    // NOW we can delete it from cache, we're done with it
+                    image_cache.erase(ts); 
+                } else {
+                     ROS_WARN("Lazy Inference Failed: RGB image for Frame %.6f missing from cache!", ts);
+                }
+            } else {
+                // If it already has depth, we can ensure the raw image is cleared to save RAM
+                if (image_cache.count(ts)) image_cache.erase(ts);
+            }
+        }
+
+        // Cleanup: Ensure cache doesn't hold images older than the oldest window frame
+        double oldest_time = Headers[0];
+        for(auto it = image_cache.begin(); it != image_cache.end(); ) {
+            if(it->first < oldest_time - 0.5) { // 0.5s buffer
+                it = image_cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        mCache.unlock();
         // 2. Run Inference
-        if (found) {
+        if (found && params.use_depth) {
         // 1. Run Inference (Returns 518x518)
         cv::Mat raw_depth_518 = depthInferer->infer(raw_img);
+        if (!raw_depth_518.empty()) {
+            std::cout << "\n[DEBUG] Raw Inference Output: " << raw_depth_518.cols << "x" << raw_depth_518.rows << std::endl;
+            
+            // Check specific rows to see where data stops
+            // We check the middle column at Top, Middle, and Bottom
+            int mid_col = raw_depth_518.cols / 2;
+            float val_top = raw_depth_518.at<float>(0, mid_col);
+            float val_mid = raw_depth_518.at<float>(raw_depth_518.rows / 2, mid_col);
+            float val_bot = raw_depth_518.at<float>(raw_depth_518.rows - 1, mid_col);
 
+            std::cout << "Top Pixel:    " << val_top << std::endl;
+            std::cout << "Middle Pixel: " << val_mid << std::endl;
+            std::cout << "Bottom Pixel: " << val_bot << std::endl;
+
+            // Small 20x20 Grid of the RAW output
+            cv::Mat raw_grid;
+            cv::resize(raw_depth_518, raw_grid, cv::Size(20, 20), 0, 0, cv::INTER_NEAREST);
+            
+            std::cout << "--- RAW 20x20 GRID (Before Resize) ---" << std::endl;
+            std::cout << std::fixed << std::setprecision(2);
+            for (int r = 0; r < 20; r++) {
+                for (int c = 0; c < 20; c++) {
+                    float val = raw_grid.at<float>(r, c);
+                    if (val == 0.0f) std::cout << "  .  "; // Print dot for zero to make it obvious
+                    else std::cout << std::setw(5) << val;
+                }
+                std::cout << "\n";
+            }
+            std::cout << "--------------------------------------" << std::endl;
+        }
         // 2. Resize to match VINS frame (1280x720)
         // VINS expects features coordinates in the original resolution
-        cv::resize(raw_depth_518, current_depth, cv::Size(1280, 720));
+        cv::resize(raw_depth_518, current_depth, cv::Size(1280, 800));
 
         // --- DEBUG BLOCK START ---
         double minVal, maxVal;
@@ -503,11 +612,41 @@ void Estimator::processImage(
             << " | Avg=" << avgVal[0]);
         // --- DEBUG BLOCK END ---
         } else {
-            ROS_WARN("Keyframe image not found in cache! Timestamp mismatch?");
+            if (params.use_depth) ROS_WARN("Keyframe image not found in cache! Timestamp mismatch?");
         }
     }
+  Headers[frame_count] = header;
+  ImageFrame imageframe(image, header);
+  imageframe.pre_integration = tmp_pre_integration;
+  
+  auto insertion_result = all_image_frame.insert(make_pair(header, imageframe));
+  auto& map_frame_ref = insertion_result.first->second;
+  //all_image_frame.insert(make_pair(header, imageframe));
+  tmp_pre_integration = new IntegrationBase{
+      acc_0,        gyr_0,        Bas[frame_count], Bgs[frame_count],
+      params.acc_n, params.gyr_n, params.acc_w,     params.gyr_w,
+      params.g};
+  
   if (!current_depth.empty()) {
-        imageframe.depth_map = current_depth.clone();
+        map_frame_ref.depth_map = current_depth.clone();
+        cv::Mat grid_view;
+    // Resize 1280x800 -> 32x20
+    // INTER_AREA is best for decimation (downsampling) as it respects pixel area relations
+    cv::resize(current_depth, grid_view, cv::Size(32, 20), 0, 0, cv::INTER_AREA);
+
+    std::cout << "\n========== 32x20 DEPTH GRID ==========\n";
+    std::cout << std::fixed << std::setprecision(2); // Fix float formatting to 2 decimals
+
+    for (int r = 0; r < grid_view.rows; ++r) {
+        for (int c = 0; c < grid_view.cols; ++c) {
+            float val = grid_view.at<float>(r, c);
+            // setw(5) ensures columns align nicely (e.g. " 1.25")
+            std::cout << std::setw(5) << val << " ";
+        }
+        std::cout << "\n"; // Newline at the end of every row
+    }
+    std::cout << "======================================\n" << std::endl;
+        ROS_INFO("Confirmed: Depth map attached to frame %.6f", header);
     }
   if (params.estimate_extrinsic == 2) {
     ROS_INFO("calibrating extrinsic param, rotation movement is needed");
@@ -927,7 +1066,11 @@ void Estimator::vector2double() {
     para_Feature[i][0] = dep(i);
     assert(i < NUM_OF_F);
   }
-
+  for (int i = 0; i <= WINDOW_SIZE; i++)
+    {
+        para_ScaleShift[i][0] = depth_net_scales[i];
+        para_ScaleShift[i][1] = depth_net_shifts[i];
+    }
   para_Td[0][0] = td;
 }
 
@@ -1006,7 +1149,11 @@ void Estimator::double2vector() {
     assert(i < NUM_OF_F);
   }
   f_manager.setDepth(dep);
-
+  for (int i = 0; i <= WINDOW_SIZE; i++)
+    {
+        depth_net_scales[i] = para_ScaleShift[i][0];
+        depth_net_shifts[i] = para_ScaleShift[i][1];
+    }
   if (params.use_imu) td = para_Td[0][0];
 }
 
@@ -1053,10 +1200,36 @@ bool Estimator::failureDetection() {
 }
 
 void Estimator::optimization() {
-  std::cout << "Optimization kicks in!" << std::endl;
+  std::cout << "\n========== DEBUG: Optimization all_image_frame STATUS ==========" << std::endl;
+  std::cout << "Current Window Size: " << frame_count << std::endl;
+  int added_depth_factors = 0;
+  int idx = 0;
+  for (const auto& item : all_image_frame) {
+      double t = item.first;
+      bool has_depth = !item.second.depth_map.empty();
+      
+      std::cout << "Frame[" << idx++ << "] TS: " 
+                << std::fixed << std::setprecision(9) << t;
+      
+      if (has_depth) {
+          std::cout << " | [HAS DEPTH] " << item.second.depth_map.cols << "x" << item.second.depth_map.rows;
+      } else {
+          std::cout << " | [NO DEPTH]";
+      }
+      std::cout << std::endl;
+  }
+  
+  std::cout << "-------- CURRENT WINDOW HEADERS (For Comparison) --------" << std::endl;
+  for (int i = 0; i <= frame_count; i++) {
+      std::cout << "Header[" << i << "]: " 
+                << std::fixed << std::setprecision(9) << Headers[i] << std::endl;
+  }
+  std::cout << "=========================================================\n" << std::endl;
+
   TicToc t_whole;
   TicToc t_prepare;
   vector2double();
+  int qualified = 0;
 
   ceres::Problem problem;
   ceres::LossFunction *loss_function;
@@ -1122,6 +1295,14 @@ void Estimator::optimization() {
 
   int f_m_cnt = 0;
   int feature_index = -1;
+  ceres::LossFunction *depth_align_loss_function = new ceres::HuberLoss(0.1);
+  // Just to use for debug later
+  for (auto &it_per_id : f_manager.feature) {
+    it_per_id.used_num = it_per_id.feature_per_frame.size();
+    if (it_per_id.used_num < 4) continue;
+    int first_frame_idx = it_per_id.start_frame;
+    numbers[first_frame_idx]++;
+  }
   for (auto &it_per_id : f_manager.feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
     if (it_per_id.used_num < 4) continue;
@@ -1172,6 +1353,65 @@ void Estimator::optimization() {
       }
       f_m_cnt++;
     }
+    if (solver_flag == NON_LINEAR && params.use_depth){
+      int first_frame_idx = it_per_id.start_frame;
+      if (numbers[first_frame_idx] < 35) continue; //If a scene has less than 30 feature points to attain scale and shift, lets not use that
+      if (inputImageCnt < 250) continue; //I'll skip first 10 seconds just in case, let the initial triangulation settle
+      if (first_frame_idx > WINDOW_SIZE - 3) continue; //Let's not check the features that cannot be tracked 4 times already.
+      double timestamp = Headers[first_frame_idx];
+      auto frame_it = all_image_frame.lower_bound(timestamp - 0.0001);
+      if (frame_it == all_image_frame.end() || std::abs(frame_it->first - timestamp) > 0.0001) {
+          // If the gap is too large, it's not the right frame.
+          frame_it = all_image_frame.end(); 
+      }
+      //std::cout << "Found frame for timestamp " << frame_it->first << std::endl;
+      //std::cout << (frame_it != all_image_frame.end()) << std::endl;
+      //std::cout << (!frame_it->second.depth_map.empty()) << std::endl;
+      if (frame_it != all_image_frame.end() && !frame_it->second.depth_map.empty()){
+        //This is a feature belonging to a keyframe with 30+ anchor features 
+        const cv::Mat& depth_map = frame_it->second.depth_map;
+        auto feature_data_it = frame_it->second.points.find(it_per_id.feature_id);
+        if (feature_data_it != frame_it->second.points.end()){
+          //The feature is actually existing in this very keyframe (just for safety)
+          //For now, the section below is hard-coded for spot_indoor_building_loop
+          double fx = 1058.17447808064;
+          double fy = 1058.44701136475;
+          double cx = 675.570437960496;
+          double cy = 334.660609848669;
+          /////////////////////////////////////////////////////////////////////
+          const auto& measurement = feature_data_it->second[0].second;
+          double x_px = std::round(measurement(0) * fx + cx);
+          double y_px = std::round(measurement(1) * fy + cy);
+          qualified++;
+          if (x_px >= 0 && x_px < depth_map.cols && y_px >= 0 && y_px < depth_map.rows){
+            //This checks if pixels lie within the depthmap
+            float depth_net_val = depth_map.at<float>(y_px, x_px); //Might add some interpolation later
+            float vins_depth = 1.0 / para_Feature[feature_index][0];
+            if (vins_depth > 0.1 && vins_depth < 80.0){
+              //For now, constant weight
+              const double weight = 1000.0;
+              ceres::CostFunction* cost_function = 
+                VioDisparityModelFactor::Create(depth_net_val, weight);
+                  problem.AddResidualBlock(cost_function,
+                                           depth_align_loss_function,
+                                           para_Feature[feature_index],
+                                           para_ScaleShift[first_frame_idx]);
+              added_depth_factors++;
+            }
+          }
+        }
+      }
+      //else std::cout << "Depthmap not found for timestamp " << timestamp << std::endl;
+    }
+  }
+
+  // A good debug
+  std::cout << "Total depth factors added in optimization: " << added_depth_factors << std::endl;
+  added_depth_factors = 0; //Reset for next optimization call
+  std::cout << "Feature count per frame: ";
+  for (int i = 0; i <= WINDOW_SIZE; i++) {
+      std::cout << numbers[i] << (i == WINDOW_SIZE ? "\n" : ", ");
+      numbers[i] = 0; // Reset for next loop
   }
 
   ROS_DEBUG("visual measurement count: %d", f_m_cnt);
@@ -1239,12 +1479,21 @@ void Estimator::optimization() {
 
     {
       int feature_index = -1;
+      ceres::LossFunction *depth_align_loss_function = new ceres::HuberLoss(0.1);
+      // Just to use for debug later
+      for (auto &it_per_id : f_manager.feature) {
+      it_per_id.used_num = it_per_id.feature_per_frame.size();
+      if (it_per_id.used_num < 4) continue;
+      int first_frame_idx = it_per_id.start_frame;
+      numbers[first_frame_idx]++;
+      }
+
       for (auto &it_per_id : f_manager.feature) {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
         if (it_per_id.used_num < 4) continue;
-
+        
         ++feature_index;
-
+        
         int imu_i = it_per_id.start_frame;
         int imu_j = imu_i - 1;
         if (imu_i != 0) continue;
