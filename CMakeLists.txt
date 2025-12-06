@@ -69,8 +69,23 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
 )
 
-find_package(OpenCV REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc video videoio cudaoptflow cudaimgproc cudaarithm)
 find_package(Ceres REQUIRED)
+message(STATUS "------------------------------------------------")
+message(STATUS "   CERES FOUND VERSION: ${Ceres_VERSION}")
+message(STATUS "   CERES INCLUDE DIR:   ${CERES_INCLUDE_DIRS}")
+message(STATUS "------------------------------------------------")
+if (TARGET Ceres::ceres)
+    # Check if the target has the CUDA definitions
+    get_target_property(CERES_COMPILE_OPTIONS Ceres::ceres INTERFACE_COMPILE_OPTIONS)
+    # Alternatively, just check the version. 2.2.0 from source usually means we did it right.
+endif()
+if (${Ceres_VERSION} VERSION_GREATER "2.0.0")
+    add_definitions(-DVINS_USE_CUDA)
+    message(STATUS "   [VINS] Enabling CUDA Solver Support!")
+else()
+    message(WARNING "   [VINS] Old Ceres detected. CUDA Solver disabled.")
+endif()
 find_package(Eigen3 REQUIRED)
 
 ## Include directories
