@@ -126,7 +126,8 @@ RUN git clone --depth 1 --branch 2.2.0 https://ceres-solver.googlesource.com/cer
     cd /ceres-solver && mkdir build && cd build && \
     cmake .. \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCERES_ENABLE_CUDA=OFF \
+      -DCERES_ENABLE_CUDA=ON \
+      -DCMAKE_CUDA_ARCHITECTURES=87 \
       -DBUILD_TESTING=OFF \
       -DBUILD_EXAMPLES=OFF && \
     make -j"$(nproc)" && make install
