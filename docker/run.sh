@@ -19,7 +19,7 @@ for d in "$HOST_DIR_1" "$HOST_DIR_2"; do
 done
 
 # Defaults (override via env if you want)
-IMAGE=ros:vins-depth-trt
+IMAGE=ros:vins-depth-trt-cu
 NAME="${NAME:-jetson_container_$(date +%Y%m%d_%H%M%S)}"
 SHM_SIZE="${SHM_SIZE:-8g}"
 
