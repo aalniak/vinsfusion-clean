@@ -23,6 +23,10 @@
 #include <cstdio>
 #include <eigen3/Eigen/Dense>
 #include <opencv2/opencv.hpp>
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/cudaoptflow.hpp>
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/cudaarithm.hpp>
 
 using namespace std;
 using namespace camodocal;
@@ -39,6 +43,9 @@ class FeatureTracker {
   explicit FeatureTracker(Parameters &params);
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
+  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageCUDA(
+      double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
+  
   void readIntrinsicParameter(const vector<string> &calib_file);
   void setPrediction(map<int, Eigen::Vector3d> &predictPts);
   void removeOutliers(set<int> &removePtsIds);
@@ -75,7 +82,15 @@ class FeatureTracker {
   cv::Mat mask_;
   cv::Mat fisheye_mask_;
   cv::Mat prev_img_, cur_img_;
+    //add gpu-specific items
+  cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> gpu_lk_tracker;
+  cv::Ptr<cv::cuda::CornersDetector> gpu_detector;
 
+  cv::cuda::GpuMat d_prev_img, d_cur_img, d_right_img;
+  cv::cuda::GpuMat d_prev_pts, d_cur_pts, d_status, d_err;
+  cv::cuda::GpuMat d_reverse_pts, d_reverse_status;
+  cv::cuda::GpuMat d_mask;
+  cv::cuda::GpuMat d_new_pts; // For feature detection
   vector<cv::Point2f> predict_pts_;
   vector<cv::Point2f> predict_pts_debug_;
   vector<cv::Point2f> prev_pts_, cur_pts_, cur_right_pts_;
