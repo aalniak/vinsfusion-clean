@@ -62,6 +62,34 @@ struct VioDisparityModelFactor
     }
 };
 // ----------------------------------------------- 
+// For Debug: Save image to folder
+void saveImageToFolder(const cv::Mat& image, const std::string& folderPath, const std::string& filename) {
+    
+    // 1. Check if the image is valid
+    if (image.empty()) {
+        std::cerr << "Error: Image is empty!" << std::endl;
+        return;
+    }
+
+    // 2. Construct the full path
+    // Ensure the folder path ends with a slash (Linux/Mac use '/', Windows uses '\\')
+    std::string fullPath;
+    if (folderPath.back() == '/' || folderPath.back() == '\\') {
+        fullPath = folderPath + filename;
+    } else {
+        fullPath = folderPath + "/" + filename;
+    }
+
+    // 3. Save the image
+    // Returns true on success, false on failure (e.g., if folder doesn't exist)
+    bool success = cv::imwrite(fullPath, image);
+
+    if (success) {
+        std::cout << "Image saved successfully to: " << fullPath << std::endl;
+    } else {
+        std::cerr << "Error: Failed to save image. Does the folder '" << folderPath << "' exist?" << std::endl;
+    }
+}
 
 Estimator::Estimator(Parameters &params)
     : f_manager{params},
@@ -160,6 +188,8 @@ void Estimator::setParameter() {
          << ric[i] << endl
          << tic[i].transpose() << endl;
   }
+  ros::NodeHandle nh("~");
+  nh.param("weight", WEIGHT, WEIGHT);
   f_manager.setRic(ric);
   ProjectionTwoFrameOneCamFactor::sqrt_info =
       params.focal_length / 1.5 * Matrix2d::Identity();
@@ -260,6 +290,8 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
     cv::Mat imgTrack = featureTracker.getTrackImage();
     pubTrackImage(imgTrack, t);
   }
+  
+
 
   if (params.multiple_thread) {
     if (inputImageCnt % 2 == 0) {
@@ -493,7 +525,7 @@ void Estimator::processImage(
         // 1. Retrieve the image from our cache
         cv::Mat raw_img;
         bool found = false;
-
+        
         //mCache.lock();
         //auto it = image_cache.lower_bound(header - 0.001); 
         //
@@ -518,16 +550,16 @@ void Estimator::processImage(
             if (all_image_frame.find(ts) == all_image_frame.end()) continue;
 
             ImageFrame &frame = all_image_frame.at(ts);
-        
+            
             // 2. If it has no depth, it needs it NOW (it has survived long enough)
-            if (frame.depth_map.empty()) {
+            if (frame.depth_map.empty() && params.use_depth && WEIGHT>0.0) {
 
                 // 3. Check if we still have the raw image in cache
                 if (image_cache.count(ts)) {
                     ROS_INFO("Lazy Inference: Backfilling depth for Frame %.6f (Index %d)", ts, i);
 
                     cv::Mat raw_img = image_cache[ts];
-
+                    
                     // Run Inference (Consider releasing lock if infer is slow, but be careful of race conditions)
                     // depthInferer->infer is likely thread-safe or blocking, usually safer to unlock during heavy compute
                     mCache.unlock(); 
@@ -538,7 +570,37 @@ void Estimator::processImage(
                     cv::resize(raw_depth_518, resized_depth, cv::Size(1280, 800));
 
                     frame.depth_map = resized_depth.clone();
+                      if (!frame.depth_map.empty()) {
+                        // 1. Update the tracker with the REAL metric depth (don't normalize this!)
+                        
 
+                        // 2. Create a separate image just for visualization
+                        cv::Mat depth_vis;
+                        
+                        // Normalize: Map min_depth -> 0 and max_depth -> 255
+                        cv::normalize(resized_depth, depth_vis, 0, 255, cv::NORM_MINMAX);
+                        
+                        // Convert to 8-bit (standard image format)
+                        depth_vis.convertTo(depth_vis, CV_8UC1);
+
+                        // Optional: Apply a colormap (makes it easier to see relative depth)
+                        // cv::Mat depth_color;
+                        // cv::applyColorMap(depth_vis, depth_color, cv::COLORMAP_JET);
+                        //featureTracker.updateDepth(depth_vis);
+                        // 3. Save the visualization
+                        // Make sure you created the folder: mkdir -p /root/catkin_ws/debug_images
+                        
+                        //cv::Mat img = featureTracker.getTrackImage();
+                        //if (!img.empty() && !depth_vis.empty()){
+                        //    cv::imshow("RGB Track", img);
+                        //    cv::imshow("Depth Track", depth_vis);
+                        //    cv::waitKey(1);
+                        //}
+                        
+                        //if (inputImageCnt % 20 == 0) saveImageToFolder(depthTrack, "/datasets/vins_debug/", "example_rgb.png");
+
+                        pubDepthTrackImage(depth_vis, ts);
+                      }
                     // NOW we can delete it from cache, we're done with it
                     image_cache.erase(ts); 
                 } else {
@@ -562,43 +624,13 @@ void Estimator::processImage(
 
         mCache.unlock();
         // 2. Run Inference
-        if (found && params.use_depth) {
+        if (found && params.use_depth && WEIGHT>0.0) {
         // 1. Run Inference (Returns 518x518)
         cv::Mat raw_depth_518 = depthInferer->infer(raw_img);
-        if (!raw_depth_518.empty()) {
-            std::cout << "\n[DEBUG] Raw Inference Output: " << raw_depth_518.cols << "x" << raw_depth_518.rows << std::endl;
-            
-            // Check specific rows to see where data stops
-            // We check the middle column at Top, Middle, and Bottom
-            int mid_col = raw_depth_518.cols / 2;
-            float val_top = raw_depth_518.at<float>(0, mid_col);
-            float val_mid = raw_depth_518.at<float>(raw_depth_518.rows / 2, mid_col);
-            float val_bot = raw_depth_518.at<float>(raw_depth_518.rows - 1, mid_col);
-
-            std::cout << "Top Pixel:    " << val_top << std::endl;
-            std::cout << "Middle Pixel: " << val_mid << std::endl;
-            std::cout << "Bottom Pixel: " << val_bot << std::endl;
-
-            // Small 20x20 Grid of the RAW output
-            cv::Mat raw_grid;
-            cv::resize(raw_depth_518, raw_grid, cv::Size(20, 20), 0, 0, cv::INTER_NEAREST);
-            
-            std::cout << "--- RAW 20x20 GRID (Before Resize) ---" << std::endl;
-            std::cout << std::fixed << std::setprecision(2);
-            for (int r = 0; r < 20; r++) {
-                for (int c = 0; c < 20; c++) {
-                    float val = raw_grid.at<float>(r, c);
-                    if (val == 0.0f) std::cout << "  .  "; // Print dot for zero to make it obvious
-                    else std::cout << std::setw(5) << val;
-                }
-                std::cout << "\n";
-            }
-            std::cout << "--------------------------------------" << std::endl;
-        }
         // 2. Resize to match VINS frame (1280x720)
         // VINS expects features coordinates in the original resolution
         cv::resize(raw_depth_518, current_depth, cv::Size(1280, 800));
-
+        
         // --- DEBUG BLOCK START ---
         double minVal, maxVal;
         cv::minMaxLoc(current_depth, &minVal, &maxVal);
@@ -612,13 +644,17 @@ void Estimator::processImage(
             << " | Avg=" << avgVal[0]);
         // --- DEBUG BLOCK END ---
         } else {
-            if (params.use_depth) ROS_WARN("Keyframe image not found in cache! Timestamp mismatch?");
+            if (params.use_depth && WEIGHT>0.0) ROS_WARN("Keyframe image not found in cache! Timestamp mismatch?");
         }
     }
   Headers[frame_count] = header;
   ImageFrame imageframe(image, header);
   imageframe.pre_integration = tmp_pre_integration;
-  
+  if (marginalization_flag == MARGIN_OLD) {
+      imageframe.is_optimization_keyframe = true;
+  } else {
+      imageframe.is_optimization_keyframe = false;
+  }
   auto insertion_result = all_image_frame.insert(make_pair(header, imageframe));
   auto& map_frame_ref = insertion_result.first->second;
   //all_image_frame.insert(make_pair(header, imageframe));
@@ -1221,8 +1257,13 @@ void Estimator::optimization() {
   
   std::cout << "-------- CURRENT WINDOW HEADERS (For Comparison) --------" << std::endl;
   for (int i = 0; i <= frame_count; i++) {
+      double t = Headers[i];
+      bool is_key = false;
+      if (all_image_frame.find(t) != all_image_frame.end()) {
+          is_key = all_image_frame[t].is_optimization_keyframe;
+      }
       std::cout << "Header[" << i << "]: " 
-                << std::fixed << std::setprecision(9) << Headers[i] << std::endl;
+                << std::fixed << std::setprecision(6) << t << (is_key ? " KF" : " not KF") << std::endl;
   }
   std::cout << "=========================================================\n" << std::endl;
 
@@ -1230,7 +1271,7 @@ void Estimator::optimization() {
   TicToc t_prepare;
   vector2double();
   int qualified = 0;
-
+  
   ceres::Problem problem;
   ceres::LossFunction *loss_function;
 
@@ -1353,9 +1394,9 @@ void Estimator::optimization() {
       }
       f_m_cnt++;
     }
-    if (solver_flag == NON_LINEAR && params.use_depth){
+    if (solver_flag == NON_LINEAR && params.use_depth && WEIGHT>0.0){
       int first_frame_idx = it_per_id.start_frame;
-      if (numbers[first_frame_idx] < 35) continue; //If a scene has less than 30 feature points to attain scale and shift, lets not use that
+      if (numbers[first_frame_idx] < params.min_features) continue; //If a scene has less than 30 feature points to attain scale and shift, lets not use that
       if (inputImageCnt < 250) continue; //I'll skip first 10 seconds just in case, let the initial triangulation settle
       if (first_frame_idx > WINDOW_SIZE - 3) continue; //Let's not check the features that cannot be tracked 4 times already.
       double timestamp = Headers[first_frame_idx];
@@ -1373,23 +1414,88 @@ void Estimator::optimization() {
         auto feature_data_it = frame_it->second.points.find(it_per_id.feature_id);
         if (feature_data_it != frame_it->second.points.end()){
           //The feature is actually existing in this very keyframe (just for safety)
-          //For now, the section below is hard-coded for spot_indoor_building_loop
-          double fx = 1058.17447808064;
-          double fy = 1058.44701136475;
-          double cx = 675.570437960496;
-          double cy = 334.660609848669;
+          double fx = params.fx;
+          double fy = params.fy;
+          double cx = params.cx;
+          double cy = params.cy;
           /////////////////////////////////////////////////////////////////////
           const auto& measurement = feature_data_it->second[0].second;
-          double x_px = std::round(measurement(0) * fx + cx);
-          double y_px = std::round(measurement(1) * fy + cy);
-          qualified++;
-          if (x_px >= 0 && x_px < depth_map.cols && y_px >= 0 && y_px < depth_map.rows){
+          //double x_raw = measurement(0) * fx + cx;
+          //double y_raw = measurement(1) * fy + cy;
+          
+          double x_raw = measurement(3);
+          double y_raw = measurement(4);
+          if (x_raw >= 0 && x_raw <= depth_map.cols - 1.0 && y_raw >= 0 && y_raw <= depth_map.rows - 1.0) 
+          {
+
             //This checks if pixels lie within the depthmap
-            float depth_net_val = depth_map.at<float>(y_px, x_px); //Might add some interpolation later
+            // 3. Get integer parts (top-left corner) and fractional parts (weights)
+            int x0 = static_cast<int>(std::floor(x_raw));
+            int y0 = static_cast<int>(std::floor(y_raw));
+            
+            if (false) { //interpolation scope
+            // Ensure we don't go out of bounds when grabbing x0 + 1 or y0 + 1
+            // (This handles the edge case where x_raw is exactly on the last pixel)
+            int x1 = std::min(x0 + 1, depth_map.cols - 1);
+            int y1 = std::min(y0 + 1, depth_map.rows - 1);
+
+            float dx = static_cast<float>(x_raw - x0);
+            float dy = static_cast<float>(y_raw - y0);
+
+            // 4. Sample the four neighbors
+            // I(x, y) where x=column, y=row
+            float val00 = depth_map.at<float>(y0, x0);
+            float val10 = depth_map.at<float>(y0, x1);
+            float val01 = depth_map.at<float>(y1, x0);
+            float val11 = depth_map.at<float>(y1, x1);
+
+            // 5. Compute Weighted Average
+            // Formula: I(x,y) = (1-dx)(1-dy)I(0,0) + dx(1-dy)I(1,0) + (1-dx)dyI(0,1) + dx*dy*I(1,1)
+            
+            // Interpolate along X first (top and bottom rows)
+            float interp_top = val00 * (1.0f - dx) + val10 * dx;
+            float interp_bot = val01 * (1.0f - dx) + val11 * dx;
+            
+            // Interpolate along Y
+            float depth_net_val = interp_top * (1.0f - dy) + interp_bot * dy;
+            }
+            else {
+              int x0 = static_cast<int>(std::floor(x_raw));
+              int y0 = static_cast<int>(std::floor(y_raw));
+
+              //select a 6x6 neighborhood's max value
+              float depth_net_val = -1.0f;
+              float depth_net_initial = depth_map.at<float>(y0, x0);
+              for (int dx = -3; dx <= 2; dx++){
+                for (int dy = -3; dy <= 2; dy++){
+                  int nx = x0 + dx;
+                  int ny = y0 + dy;
+                  if (nx >= 0 && nx < depth_map.cols && ny >=0 && ny < depth_map.rows){
+                    float val = depth_map.at<float>(ny, nx);
+                    if (val > depth_net_val) {
+                      depth_net_val = val; 
+                      
+                    }
+            }
+          }
+        }
+          if (std::abs(1 - (depth_net_initial / depth_net_val)) < 0.2) {
+            depth_net_val = depth_net_initial; 
+            
+          } 
+          else{
+            qualified++;
+            std::cout << "Using highest inverse depth in neighborhood: " << depth_net_val << " instead of " << depth_net_initial << std::endl;
+          }//Sanity check to avoid outliers
+            ROS_INFO_STREAM_THROTTLE(0.03, 
+                "Sanity check: " << x_raw << " " << y_raw << 
+                " | Debug interp: " << depth_net_initial << " " << depth_net_val
+            );//float depth_net_val = depth_map.at<float>(y_px, x_px); //Might add some interpolation later
+            
             float vins_depth = 1.0 / para_Feature[feature_index][0];
-            if (vins_depth > 0.1 && vins_depth < 80.0){
+            if (vins_depth > 0.1 && vins_depth < 80.0 && depth_net_val>0.001){
               //For now, constant weight
-              const double weight = 1000.0;
+              const double weight = WEIGHT;
               ceres::CostFunction* cost_function = 
                 VioDisparityModelFactor::Create(depth_net_val, weight);
                   problem.AddResidualBlock(cost_function,
@@ -1403,10 +1509,11 @@ void Estimator::optimization() {
       }
       //else std::cout << "Depthmap not found for timestamp " << timestamp << std::endl;
     }
-  }
+  }}
 
   // A good debug
-  std::cout << "Total depth factors added in optimization: " << added_depth_factors << std::endl;
+  std::cout << "Total depth factors added in optimization: " << added_depth_factors << " with weight " << WEIGHT << "and minimum feature number: " << params.min_features << std::endl;
+  std::cout << "Total fixed edge depths: " << qualified << std::endl;
   added_depth_factors = 0; //Reset for next optimization call
   std::cout << "Feature count per frame: ";
   for (int i = 0; i <= WINDOW_SIZE; i++) {

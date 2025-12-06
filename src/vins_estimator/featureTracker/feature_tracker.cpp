@@ -13,7 +13,7 @@
 #include <vins_estimator/featureTracker/feature_tracker.h>
 
 namespace vins::estimator {
-
+bool ready = false;
 bool FeatureTracker::inBorder(const cv::Point2f &pt) const {
   const int BORDER_SIZE = 1;
   int img_x = cvRound(pt.x);
@@ -242,6 +242,12 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
   if (params.show_track)
     drawTrack(cur_img_, rightImg, ids_, cur_pts_, cur_right_pts_,
               prev_left_pts_map_);
+
+  if (!depth_img_.empty() && false){
+    drawDepthTrack(depth_img_, ids_, cur_pts_, cur_right_pts_,
+                   prev_left_pts_map_);
+    ready = false;
+    }
 
   prev_img_ = cur_img_;
   prev_pts_ = cur_pts_;
@@ -472,6 +478,51 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
   // cv::Mat imCur2Compress;
   // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
 }
+void FeatureTracker::updateDepth(const cv::Mat &depthImg) {
+  depth_img_ = depthImg;
+  ready = true;
+}
+
+void FeatureTracker::drawDepthTrack(const cv::Mat &imLeft,
+                               vector<int> &curLeftIds,
+                               vector<cv::Point2f> &curLeftPts,
+                               vector<cv::Point2f> &curRightPts,
+                               map<int, cv::Point2f> &prevLeftPtsMap) {
+  // int rows = imLeft.rows;
+  int cols = imLeft.cols;
+  d_track = imLeft.clone();
+  cv::cvtColor(d_track, d_track, cv::COLOR_GRAY2RGB);
+
+  for (size_t j = 0; j < curLeftPts.size(); j++) {
+    double len = std::min(1.0, 1.0 * track_cnt_[j] / 20);
+    cv::circle(d_track, curLeftPts[j], 2,
+               cv::Scalar(255 * (1 - len), 0, 255 * len), 2);
+  }
+ 
+
+  map<int, cv::Point2f>::iterator mapIt;
+  for (size_t i = 0; i < curLeftIds.size(); i++) {
+    int id = curLeftIds[i];
+    mapIt = prevLeftPtsMap.find(id);
+    if (mapIt != prevLeftPtsMap.end()) {
+      cv::arrowedLine(d_track, curLeftPts[i], mapIt->second,
+                      cv::Scalar(0, 255, 0), 1, 8, 0, 0.2);
+    }
+  }
+
+  // draw prediction
+  /*
+  for(size_t i = 0; i < predict_pts_debug.size(); i++)
+  {
+      cv::circle(imTrack, predict_pts_debug[i], 2, cv::Scalar(0, 170, 255),
+  2);
+  }
+  */
+  // printf("predict pts size %d \n", (int)predict_pts_debug.size());
+
+  // cv::Mat imCur2Compress;
+  // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
+}
 
 void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts) {
   has_prediction_ = true;
@@ -510,5 +561,5 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds) {
 }
 
 cv::Mat FeatureTracker::getTrackImage() { return im_track_; }
-
+cv::Mat FeatureTracker::getDepthTrackImage() { return d_track; }
 }  // namespace vins::estimator

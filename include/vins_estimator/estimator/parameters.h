@@ -69,7 +69,7 @@ struct Parameters {
   double f_threshold;
   int show_track;
   int flow_back;
-
+  int min_features;
   std::string pose_graph_save_path;
   int save_image;
   int load_previous_pose_graph;
@@ -79,6 +79,7 @@ struct Parameters {
   int feature_debug;
   std::string feature_debug_path;
   bool use_depth;
+  float fx, fy, cx, cy;
   LossType loss_type;
   double loss_parameter;
   LossType loss_type_initial;

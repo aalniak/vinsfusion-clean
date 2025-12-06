@@ -145,7 +145,7 @@ class Estimator {
   int frame_count = 0;
   int sum_of_outlier = 0, sum_of_back = 0, sum_of_front = 0, sum_of_invalid = 0;
   int inputImageCnt = 0;
-
+  double WEIGHT = 1.0;
   FeatureManager f_manager;
   MotionEstimator m_estimator;
   InitialEXRotation initial_ex_rotation;

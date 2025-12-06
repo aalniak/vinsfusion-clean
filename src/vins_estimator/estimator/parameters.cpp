@@ -63,7 +63,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   num_iterations = fsSettings["max_num_iterations"];
   min_parallax = fsSettings["keyframe_parallax"];
   min_parallax /= focal_length;
-
+  fsSettings["min_features"] >> min_features;
   fsSettings["output_path"] >> output_folder;
   vins_result_path = output_folder + "/vio.csv";
   feature_debug_path = output_folder + "/feature_debug.csv";
@@ -167,6 +167,10 @@ void Parameters::read_from_file(const std::string &config_file) {
 
   fsSettings["pose_graph_save_path"] >> pose_graph_save_path;
   fsSettings["use_depth"] >> use_depth;
+  fsSettings["fx"] >> fx;
+  fsSettings["fy"] >> fy;
+  fsSettings["cx"] >> cx;
+  fsSettings["cy"] >> cy;
   save_image = fsSettings["save_image"];
   load_previous_pose_graph = fsSettings["load_previous_pose_graph"];
 

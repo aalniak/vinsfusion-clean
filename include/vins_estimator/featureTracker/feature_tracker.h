@@ -43,7 +43,8 @@ class FeatureTracker {
   void setPrediction(map<int, Eigen::Vector3d> &predictPts);
   void removeOutliers(set<int> &removePtsIds);
   cv::Mat getTrackImage();
-
+  cv::Mat getDepthTrackImage();
+  void updateDepth(const cv::Mat &depthImg);
  private:
   void setMask();
   void showUndistortion(const string &name);
@@ -59,11 +60,18 @@ class FeatureTracker {
                  map<int, cv::Point2f> &prevLeftPtsMap);
   bool inBorder(const cv::Point2f &pt) const;
   static double distance(const cv::Point2f &pt1, const cv::Point2f &pt2);
-
+  void drawDepthTrack(const cv::Mat &imLeft,
+                               vector<int> &curLeftIds,
+                               vector<cv::Point2f> &curLeftPts,
+                               vector<cv::Point2f> &curRightPts,
+                               map<int, cv::Point2f> &prevLeftPtsMap);
+  
   Parameters &params;
 
   int row, col;
   cv::Mat im_track_;
+  cv::Mat d_track;
+  cv::Mat depth_img_;
   cv::Mat mask_;
   cv::Mat fisheye_mask_;
   cv::Mat prev_img_, cur_img_;
