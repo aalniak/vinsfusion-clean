@@ -1,0 +1,17 @@
+%YAML:1.0
+---
+model_type: PINHOLE
+camera_name: ovc_left
+image_width: 1280
+image_height: 800
+distortion_parameters:
+   k1: -0.394405550977095
+   k2: 0.158402718063528
+   p1: -0.000168956629577392
+   p2: 0.0001044135623947
+projection_parameters:
+   fx: 1056.8925850471
+   fy: 1057.26495783819
+   cx: 678.639186088212
+   cy: 337.365662960587
+
