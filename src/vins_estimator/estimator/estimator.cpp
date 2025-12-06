@@ -91,6 +91,35 @@ void saveImageToFolder(const cv::Mat& image, const std::string& folderPath, cons
     }
 }
 
+inline float getBilinearDepth(const cv::Mat& depth_map, float x, float y) {
+    // Boundary check
+    if (x < 0 || x >= depth_map.cols - 1 || y < 0 || y >= depth_map.rows - 1)
+        return -1.0f;
+
+    int x0 = static_cast<int>(x);
+    int y0 = static_cast<int>(y);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    float dx = x - x0;
+    float dy = y - y0;
+
+    // Fast pointer access to rows (Avoids .at() overhead)
+    const float* row0 = depth_map.ptr<float>(y0);
+    const float* row1 = depth_map.ptr<float>(y1);
+
+    float val00 = row0[x0];
+    float val10 = row0[x1];
+    float val01 = row1[x0];
+    float val11 = row1[x1];
+
+    // Bilinear interpolation
+    float top = val00 * (1.0f - dx) + val10 * dx;
+    float bot = val01 * (1.0f - dx) + val11 * dx;
+    return top * (1.0f - dy) + bot * dy;
+}
+
+
 Estimator::Estimator(Parameters &params)
     : f_manager{params},
       featureTracker{params},
@@ -1430,34 +1459,10 @@ void Estimator::optimization() {
 
             //This checks if pixels lie within the depthmap
             // 3. Get integer parts (top-left corner) and fractional parts (weights)
-            int x0 = static_cast<int>(std::floor(x_raw));
-            int y0 = static_cast<int>(std::floor(y_raw));
+            
             
             if (false) { //interpolation scope
-            // Ensure we don't go out of bounds when grabbing x0 + 1 or y0 + 1
-            // (This handles the edge case where x_raw is exactly on the last pixel)
-            int x1 = std::min(x0 + 1, depth_map.cols - 1);
-            int y1 = std::min(y0 + 1, depth_map.rows - 1);
-
-            float dx = static_cast<float>(x_raw - x0);
-            float dy = static_cast<float>(y_raw - y0);
-
-            // 4. Sample the four neighbors
-            // I(x, y) where x=column, y=row
-            float val00 = depth_map.at<float>(y0, x0);
-            float val10 = depth_map.at<float>(y0, x1);
-            float val01 = depth_map.at<float>(y1, x0);
-            float val11 = depth_map.at<float>(y1, x1);
-
-            // 5. Compute Weighted Average
-            // Formula: I(x,y) = (1-dx)(1-dy)I(0,0) + dx(1-dy)I(1,0) + (1-dx)dyI(0,1) + dx*dy*I(1,1)
-            
-            // Interpolate along X first (top and bottom rows)
-            float interp_top = val00 * (1.0f - dx) + val10 * dx;
-            float interp_bot = val01 * (1.0f - dx) + val11 * dx;
-            
-            // Interpolate along Y
-            float depth_net_val = interp_top * (1.0f - dy) + interp_bot * dy;
+              float depth_net_val = getBilinearDepth(depth_map, x_raw, y_raw);
             }
             else {
               int x0 = static_cast<int>(std::floor(x_raw));
@@ -1526,13 +1531,33 @@ void Estimator::optimization() {
 
   ceres::Solver::Options options;
 
-  options.linear_solver_type = ceres::DENSE_SCHUR;
+  //options.linear_solver_type = ceres::DENSE_SCHUR;
   // options.num_threads = 2;
   options.trust_region_strategy_type = ceres::DOGLEG;
   options.max_num_iterations = params.num_iterations;
   // options.use_explicit_schur_complement = true;
   // options.minimizer_progress_to_stdout = true;
   // options.use_nonmonotonic_steps = true;
+  if (params.use_cuda_in_optimization){
+    #ifdef VINS_USE_CUDA 
+      options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+      options.dense_linear_algebra_library_type = ceres::CUDA;
+      options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+      // Orin has many cores, let Ceres use them for Jacobian evaluation
+      options.num_threads = 6; 
+      ROS_WARN_ONCE("\033[1;32m[VINS-GPU] Ceres is compiled with CUDA support! Using GPU Solver.\033[0m");
+      std::cout << "[VINS-GPU] Dense Algebra: CUDA" << std::endl;
+      std::cout << "[VINS-GPU] Sparse Algebra: CUDA_SPARSE" << std::endl;
+    #else
+      // 3. DEBUG PRINT: Warn if we missed the definition
+      ROS_WARN_ONCE("\033[1;31m[VINS-CPU] Ceres CUDA support NOT found. Falling back to CPU.\033[0m");
+      // Standard CPU Fallback
+      options.linear_solver_type = ceres::DENSE_SCHUR;
+    #endif
+  }
+  else{
+    options.linear_solver_type = ceres::DENSE_SCHUR;
+  }
   if (marginalization_flag == MARGIN_OLD)
     options.max_solver_time_in_seconds = params.solver_time * 4.0 / 5.0;
   else
@@ -1540,11 +1565,28 @@ void Estimator::optimization() {
   TicToc t_solver;
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
-  // cout << summary.BriefReport() << endl;
+
+  ROS_INFO("Solver Time: %.2fms | Cost: %.2e -> %.2e | Iter: %d", 
+           summary.total_time_in_seconds * 1000.0,
+           summary.initial_cost,
+           summary.final_cost,
+           (int)summary.iterations.size());
+
+  cout << summary.BriefReport() << endl;
   ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
   // printf("solver costs: %f \n", t_solver.toc());
 
   double2vector();
+  std::cout << "\n========== ESTIMATED SCALE & SHIFT ==========" << std::endl;
+    std::cout << std::fixed << std::setprecision(5); // Set precision for cleaner output
+    for (int i = 0; i <= WINDOW_SIZE; i++) {
+        // para_ScaleShift[i][0] is Scale
+        // para_ScaleShift[i][1] is Shift
+        std::cout << "Frame [" << i << "]: "
+                  << "Scale = " << para_ScaleShift[i][0] << "  "
+                  << "Shift = " << para_ScaleShift[i][1] << std::endl;
+    }
+    std::cout << "===========================================\n" << std::endl;
   // printf("frame_count: %d \n", frame_count);
 
   if (frame_count < WINDOW_SIZE) return;
