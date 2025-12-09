@@ -82,7 +82,7 @@ struct Parameters {
   
   int use_cuda_in_optimization;
   int use_cuda_in_tracking;
-
+  int rgd;
   float fx, fy, cx, cy;
   LossType loss_type;
   double loss_parameter;

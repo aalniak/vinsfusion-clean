@@ -45,7 +45,8 @@ class FeatureTracker {
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageCUDA(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
-  
+  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageVecCUDA(
+    double _cur_time, const cv::Mat &_img, const cv::Mat &depth, const cv::Mat &_img1 = cv::Mat());
   void readIntrinsicParameter(const vector<string> &calib_file);
   void setPrediction(map<int, Eigen::Vector3d> &predictPts);
   void removeOutliers(set<int> &removePtsIds);

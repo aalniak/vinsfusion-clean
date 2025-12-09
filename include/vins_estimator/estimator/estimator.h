@@ -116,7 +116,7 @@ class Estimator {
   std::thread processThread;
 
   FeatureTracker featureTracker;
-
+  cv::Mat prev_raw_depth;
   SolverFlag solver_flag;
   MarginalizationFlag marginalization_flag;
   Vector3d g;

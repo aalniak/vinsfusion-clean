@@ -18,7 +18,8 @@ private:
     
     void* buffers[2]; // 0: Input, 1: Output
     float* cpu_output_buffer = nullptr;
-    
+    float* h_input_pinned = nullptr;
+    cudaStream_t stream;
     // Hardcoded for Depth Anything AC Small
     const int INPUT_W = 518;
     const int INPUT_H = 518;

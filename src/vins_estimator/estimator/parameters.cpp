@@ -170,7 +170,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   fsSettings["use_depth"] >> use_depth;
   fsSettings["use_cuda_in_optimization"] >> use_cuda_in_optimization;
   fsSettings["use_cuda_in_tracking"] >> use_cuda_in_tracking;
-  
+  fsSettings["rgd"] >> rgd;
   fsSettings["fx"] >> fx;
   fsSettings["fy"] >> fy;
   fsSettings["cx"] >> cx;

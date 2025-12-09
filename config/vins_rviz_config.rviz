@@ -166,11 +166,11 @@ Visualization Manager:
           Value: false
         - Class: rviz/Image
           Enabled: true
-          Image Topic: /loop_fusion/match_image
+          Image Topic: /vins_estimator/depth
           Max Value: 1
           Median window: 5
           Min Value: 0
-          Name: loop_match_Image
+          Name: depth
           Normalize Range: true
           Queue Size: 2
           Transport Hint: raw

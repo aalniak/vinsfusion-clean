@@ -61,7 +61,8 @@ DepthInfer::DepthInfer(std::string engine_path) {
     // 3. Allocate GPU Memory
     cudaMalloc(&buffers[0], INPUT_SIZE * sizeof(float)); // Input
     cudaMalloc(&buffers[1], OUTPUT_SIZE * sizeof(float)); // Output
-    
+    cudaMallocHost((void**)&h_input_pinned, INPUT_SIZE * sizeof(float));
+    cudaStreamCreate(&stream);
     cpu_output_buffer = new float[OUTPUT_SIZE];
 }
 
@@ -70,62 +71,76 @@ DepthInfer::~DepthInfer() {
     cudaFree(buffers[0]);
     cudaFree(buffers[1]);
     delete[] cpu_output_buffer;
-    
+    if (h_input_pinned) cudaFreeHost(h_input_pinned);
     // Clean up TRT pointers
     // Note: In newer TRT versions, use delete. In older, use ->destroy()
     if(context) delete context;
     if(engine) delete engine;
     if(runtime) delete runtime;
+    
 }
-static bool first_run = true;
+
 cv::Mat DepthInfer::infer(cv::Mat& img) {
     if (!context) {
-        std::cerr << "Inference skipped: Context not initialized." << std::endl;
+        std::cerr << "Context not initialized." << std::endl;
         return cv::Mat();
     }
-    
-    if (first_run) {
-        std::cout << "\n[DepthInfer] COMPILED Dimensions: " << INPUT_W << "x" << INPUT_H << std::endl;
-        std::cout << "[DepthInfer] Memory Buffer Size: " << INPUT_SIZE << " floats" << std::endl;
-        first_run = false;
-    }
-    // --- PREPROCESS ---
-    cv::Mat resized, float_img;
-    cv::resize(img, resized, cv::Size(INPUT_W, INPUT_H));
-    
-    // Convert to float (0..1)
-    resized.convertTo(float_img, CV_32FC3, 1.0f / 255.0f);
-    
-    // Normalize (ImageNet Mean/Std)
-    // Mean: 0.485, 0.456, 0.406 | Std: 0.229, 0.224, 0.225
-    cv::subtract(float_img, cv::Scalar(0.485, 0.456, 0.406), float_img);
-    cv::divide(float_img, cv::Scalar(0.229, 0.224, 0.225), float_img);
 
-    // HWC to CHW conversion
-    std::vector<float> input_nchw(INPUT_SIZE);
-    int idx = 0;
-    for (int c = 0; c < 3; ++c) {
-        for (int h = 0; h < INPUT_H; ++h) {
-            for (int w = 0; w < INPUT_W; ++w) {
-                // OpenCV is BGR. Model needs RGB.
-                // input[c] corresponds to RGB. BGR image index 2-c flips it.
-                input_nchw[idx++] = float_img.at<cv::Vec3f>(h, w)[2 - c]; 
-            }
-        }
+    // 1. Resize
+    cv::Mat resized;
+    cv::resize(img, resized, cv::Size(INPUT_W, INPUT_H));
+
+    // 2. Optimized Preprocessing (Single Loop, Pinned Memory)
+    // Constants for Normalization
+    const float mean_r = 0.485f; const float std_r = 0.229f;
+    const float s_r = 1.0f / (255.0f * std_r);
+    const float o_r = mean_r / std_r;
+
+    const float mean_g = 0.456f; const float std_g = 0.224f;
+    const float s_g = 1.0f / (255.0f * std_g);
+    const float o_g = mean_g / std_g;
+
+    const float mean_b = 0.406f; const float std_b = 0.225f;
+    const float s_b = 1.0f / (255.0f * std_b);
+    const float o_b = mean_b / std_b;
+
+    // Pointers to pinned memory planes
+    float* p_r = h_input_pinned;
+    float* p_g = h_input_pinned + (INPUT_W * INPUT_H);
+    float* p_b = h_input_pinned + (2 * INPUT_W * INPUT_H);
+
+    int total_pixels = INPUT_W * INPUT_H;
+    const uchar* ptr_img = resized.ptr<uchar>(0);
+
+    // Fast HWC -> CHW + Normalize loop
+    for (int i = 0; i < total_pixels; ++i) {
+        uchar b = ptr_img[3*i + 0];
+        uchar g = ptr_img[3*i + 1];
+        uchar r = ptr_img[3*i + 2];
+
+        p_r[i] = (static_cast<float>(r) * s_r) - o_r;
+        p_g[i] = (static_cast<float>(g) * s_g) - o_g;
+        p_b[i] = (static_cast<float>(b) * s_b) - o_b;
     }
 
     // --- INFERENCE ---
-    cudaMemcpy(buffers[0], input_nchw.data(), INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice);
     
-    // executeV2 is standard for recent TensorRT versions
-    context->executeV2(buffers); 
+    // 1. Upload asynchronously
+    cudaMemcpyAsync(buffers[0], h_input_pinned, INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice, stream);
+    
+    // 2. Wait for upload to finish (Safe for executeV2)
+    cudaStreamSynchronize(stream);
 
-    cudaMemcpy(cpu_output_buffer, buffers[1], OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+    // 3. Execute (Synchronous/Blocking is safer if enqueueV2 is missing)
+    context->executeV2(buffers);
+
+    // 4. Download asynchronously
+    cudaMemcpyAsync(cpu_output_buffer, buffers[1], OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    
+    // 5. Wait for download
+    cudaStreamSynchronize(stream);
 
     // --- POSTPROCESS ---
-    // Wrap buffer in Mat
     cv::Mat depth_map(OUTPUT_H, OUTPUT_W, CV_32FC1, cpu_output_buffer);
-    
-    // Return a deep copy so we can reuse the buffer next time
     return depth_map.clone(); 
 }

@@ -272,28 +272,123 @@ void Estimator::changeSensorType(int use_imu, int use_stereo) {
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_img, 
                            const cv::Mat &_img1) {
   inputImageCnt++;
-  std::cout << "[Input] Image dims: " << _img.cols << "x" << _img.rows << std::endl;
-  mCache.lock();
-  // VINS often uses mono images. Ensure we have 3 channels for Depth Anything
+  std::cout << "Processing frame number " << inputImageCnt << std::endl;
+  
+  // 1. Prepare RGB image for Cache (and Inference)
   cv::Mat rgb_img;
   if (_img.channels() == 1) {
       cv::cvtColor(_img, rgb_img, cv::COLOR_GRAY2RGB);
   } else {
       rgb_img = _img.clone();
   }
+
+  // 2. Cache Logic
+  mCache.lock();
   image_cache[t] = rgb_img;
-    
-    // Cleanup old cache (keep last 2s buffer) to prevent memory leaks
   for(auto it = image_cache.begin(); it != image_cache.end(); ) {
       if(it->first < t - 4.0) it = image_cache.erase(it);
       else ++it;
   }
   mCache.unlock();
-  
 
+  // 3. Inference & Depth Injection
+  // Initialize with the original Mono8 image by default
+  cv::Mat img_for_tracker = _img.clone(); 
+
+
+  cv::Mat depth_8u;
+ if (depthInferer && params.rgd) {
+        
+        // --- TIMER: INFERENCE ---
+        TicToc t_infer; 
+        
+        // A. Run Inference (Small Image -> Small Float Map)
+        cv::Mat raw_inv_depth = depthInferer->infer(rgb_img);
+        
+        
+        double time_infer = t_infer.toc();
+
+        // --- TIMER: POST-PROCESSING ---
+        TicToc t_proc;
+        
+        // [OPTIMIZATION A]: Math on Small Float Image (518x518)
+        cv::Mat metric_depth;
+        cv::divide(1.0, raw_inv_depth, metric_depth);
+
+        // --- OPTIMIZATION: STRIDED SAMPLING (Approx 0.05ms) ---
+        // We sample ~600 pixels to estimate the distribution.
+        // This avoids iterating the whole 518x518 image.
+        
+        // Define sample size (hardcoded for speed, prevents allocation)
+        // 518*518 / 431 is roughly 622 samples. 
+        // Using a prime number stride prevents aliasing patterns.
+        const int STRIDE = 101; 
+        const int MAX_SAMPLES = 2700; 
+        float samples[MAX_SAMPLES]; 
+        
+        int sample_count = 0;
+        const float* ptr = (float*)metric_depth.data;
+        const int total_pixels = metric_depth.rows * metric_depth.cols;
+
+        // 1. FAST GATHER
+        for (int i = 0; i < total_pixels && sample_count < MAX_SAMPLES; i += STRIDE) {
+            samples[sample_count++] = ptr[i];
+        }
+
+        double robustMin, robustMax;
+
+        if (sample_count > 10) {
+            // 2. PARTIAL SORT (nth_element is O(N) on the small sample buffer)
+            // Find lower 2.5%
+            int idx_low = sample_count * 0.05;
+            std::nth_element(samples, samples + idx_low, samples + sample_count);
+            robustMin = samples[idx_low];
+
+            // Find upper 97.5%
+            int idx_high = sample_count * 0.95;
+            // Note: We continue from the previous sort state
+            std::nth_element(samples + idx_low + 1, samples + idx_high, samples + sample_count);
+            robustMax = samples[idx_high];
+        } else {
+            // Fallback if image is tiny or something failed
+            cv::minMaxLoc(metric_depth, &robustMin, &robustMax);
+        }
+        
+        // Safety clamp to prevent div by zero
+        if (robustMax <= robustMin + 1e-5) {
+            robustMax = robustMin + 1.0;
+        }
+
+        // --- CONVERT AND RESIZE ---
+        cv::Mat depth_small_8u;
+        double scale = 255.0 / (robustMax - robustMin);
+        metric_depth.convertTo(depth_small_8u, CV_8U, scale, -robustMin * scale);
+
+        // [OPTIMIZATION D]: Resize the Byte Image (Fastest Resize)
+        // INTER_NEAREST is fastest, INTER_LINEAR looks better. Try NEAREST if still slow.
+        
+        cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
+        
+        pubDepthTrackImage(depth_8u, t);
+        // [OPTIMIZATION E]: Single Channel Blending (No Merge/Split/CvtColor)
+        // Weighted sum: 70% Original Gray + 30% Depth Map
+        //cv::addWeighted(_img, 0.85, depth_8u, 0.15, 0, img_for_tracker);
+
+        double time_proc = t_proc.toc();
+
+        // --- PRINT DEBUG STATS ---
+        // Only print if it's taking significant time (> 3ms)
+        
+        printf("[Depth] Infer: %.2f ms | Post-Proc: %.2f ms | Total Add: %.2f ms\n", 
+                time_infer, time_proc, time_infer + time_proc);
+        
+    } 
+  // Else: img_for_tracker remains the original _img (Mono8)
+
+  // 4. Feature Tracking
+  // Now strictly passing a Mono8 image every time
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
-  TicToc featureTrackerTime;
-
+  
   if (params.multiple_thread) {
     mBuf.lock();
     while (!outlierBuf.empty()) {
@@ -310,17 +405,17 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
   }
 
   if (_img1.empty())
-    featureFrame = featureTracker.trackImage(t, _img);
+    if (params.use_cuda_in_tracking)
+      featureFrame = featureTracker.trackImageCUDA(t, _img, depth_8u);
+    else
+      featureFrame = featureTracker.trackImage(t, img_for_tracker);
   else
-    featureFrame = featureTracker.trackImage(t, _img, _img1);
-  // printf("featureTracker time: %f\n", featureTrackerTime.toc());
+    featureFrame = featureTracker.trackImage(t, img_for_tracker, _img1);
 
   if (params.show_track) {
     cv::Mat imgTrack = featureTracker.getTrackImage();
     pubTrackImage(imgTrack, t);
   }
-  
-
 
   if (params.multiple_thread) {
     if (inputImageCnt % 2 == 0) {
@@ -549,7 +644,7 @@ void Estimator::processImage(
   ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
   ROS_DEBUG("Solving %d", frame_count);
   ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
-  if (marginalization_flag == MARGIN_OLD) {
+  if (marginalization_flag == MARGIN_OLD && params.use_depth && WEIGHT>0.0) {
         std::cout << header << " is a keyframe, lets get the depth!" << std::endl;
         // 1. Retrieve the image from our cache
         cv::Mat raw_img;
@@ -661,16 +756,15 @@ void Estimator::processImage(
         cv::resize(raw_depth_518, current_depth, cv::Size(1280, 800));
         
         // --- DEBUG BLOCK START ---
-        double minVal, maxVal;
-        cv::minMaxLoc(current_depth, &minVal, &maxVal);
-        cv::Scalar avgVal = cv::mean(current_depth);
-
-        ROS_INFO_STREAM("Depth Debug:"
-            << " Size=" << current_depth.cols << "x" << current_depth.rows
-            << " | Type=" << current_depth.type()  // Should be 5 (CV_32FC1)
-            << " | Min=" << minVal
-            << " | Max=" << maxVal
-            << " | Avg=" << avgVal[0]);
+        //double minVal, maxVal;
+        //cv::minMaxLoc(current_depth, &minVal, &maxVal);
+        //cv::Scalar avgVal = cv::mean(current_depth);
+        //ROS_INFO_STREAM("Depth Debug:"
+        //    << " Size=" << current_depth.cols << "x" << current_depth.rows
+        //    << " | Type=" << current_depth.type()  // Should be 5 (CV_32FC1)
+        //    << " | Min=" << minVal
+        //    << " | Max=" << maxVal
+        //    << " | Avg=" << avgVal[0]);
         // --- DEBUG BLOCK END ---
         } else {
             if (params.use_depth && WEIGHT>0.0) ROS_WARN("Keyframe image not found in cache! Timestamp mismatch?");
@@ -1273,28 +1367,28 @@ void Estimator::optimization() {
       double t = item.first;
       bool has_depth = !item.second.depth_map.empty();
       
-      std::cout << "Frame[" << idx++ << "] TS: " 
-                << std::fixed << std::setprecision(9) << t;
-      
-      if (has_depth) {
-          std::cout << " | [HAS DEPTH] " << item.second.depth_map.cols << "x" << item.second.depth_map.rows;
-      } else {
-          std::cout << " | [NO DEPTH]";
-      }
-      std::cout << std::endl;
+      //std::cout << "Frame[" << idx++ << "] TS: " 
+      //          << std::fixed << std::setprecision(9) << t;
+      //
+      //if (has_depth) {
+      //    std::cout << " | [HAS DEPTH] " << item.second.depth_map.cols << "x" << item.second.depth_map.rows;
+      //} else {
+      //    std::cout << " | [NO DEPTH]";
+      //}
+      //std::cout << std::endl;
   }
   
-  std::cout << "-------- CURRENT WINDOW HEADERS (For Comparison) --------" << std::endl;
-  for (int i = 0; i <= frame_count; i++) {
-      double t = Headers[i];
-      bool is_key = false;
-      if (all_image_frame.find(t) != all_image_frame.end()) {
-          is_key = all_image_frame[t].is_optimization_keyframe;
-      }
-      std::cout << "Header[" << i << "]: " 
-                << std::fixed << std::setprecision(6) << t << (is_key ? " KF" : " not KF") << std::endl;
-  }
-  std::cout << "=========================================================\n" << std::endl;
+  //std::cout << "-------- CURRENT WINDOW HEADERS (For Comparison) --------" << std::endl;
+  //for (int i = 0; i <= frame_count; i++) {
+  //    double t = Headers[i];
+  //    bool is_key = false;
+  //    if (all_image_frame.find(t) != all_image_frame.end()) {
+  //        is_key = all_image_frame[t].is_optimization_keyframe;
+  //    }
+  //    std::cout << "Header[" << i << "]: " 
+  //              << std::fixed << std::setprecision(6) << t << (is_key ? " KF" : " not KF") << std::endl;
+  //}
+  //std::cout << "=========================================================\n" << std::endl;
 
   TicToc t_whole;
   TicToc t_prepare;
@@ -1577,17 +1671,17 @@ void Estimator::optimization() {
   // printf("solver costs: %f \n", t_solver.toc());
 
   double2vector();
-  std::cout << "\n========== ESTIMATED SCALE & SHIFT ==========" << std::endl;
-    std::cout << std::fixed << std::setprecision(5); // Set precision for cleaner output
-    for (int i = 0; i <= WINDOW_SIZE; i++) {
-        // para_ScaleShift[i][0] is Scale
-        // para_ScaleShift[i][1] is Shift
-        std::cout << "Frame [" << i << "]: "
-                  << "Scale = " << para_ScaleShift[i][0] << "  "
-                  << "Shift = " << para_ScaleShift[i][1] << std::endl;
-    }
-    std::cout << "===========================================\n" << std::endl;
-  // printf("frame_count: %d \n", frame_count);
+  //std::cout << "\n========== ESTIMATED SCALE & SHIFT ==========" << std::endl;
+  //  std::cout << std::fixed << std::setprecision(5); // Set precision for cleaner output
+  //  for (int i = 0; i <= WINDOW_SIZE; i++) {
+  //      // para_ScaleShift[i][0] is Scale
+  //      // para_ScaleShift[i][1] is Shift
+  //      std::cout << "Frame [" << i << "]: "
+  //                << "Scale = " << para_ScaleShift[i][0] << "  "
+  //                << "Shift = " << para_ScaleShift[i][1] << std::endl;
+  //  }
+  //  std::cout << "===========================================\n" << std::endl;
+  //// printf("frame_count: %d \n", frame_count);
 
   if (frame_count < WINDOW_SIZE) return;
 
