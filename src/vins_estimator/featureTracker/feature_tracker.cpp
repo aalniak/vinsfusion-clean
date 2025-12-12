@@ -354,35 +354,24 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
 
     // [GPU] 1. Upload Current Image to GPU
     // We do this ONCE at the start so both tracking and detection can use it
-    cur_img_.copyTo(cpu_cur_img_view); //shared cpu buffer
-    d_cur_img = gpu_cur_img_view;     //shared gpu buffer
+    d_cur_img.upload(cur_img_);
+
     if (prev_pts_.size() > 0) {
         TicToc t_o;
-        int N = prev_pts_.size();
         vector<uchar> status;
         vector<float> err;
 
         // [GPU] 2. Upload Previous Points
         // We must reshape vector<Point2f> to a 1xN matrix for CUDA
-        cv::Mat cpu_prev_pts = mem_prev_pts.createMatHeader();
-        cv::Mat active_cpu_prev = cpu_prev_pts.colRange(0, N);
-        memcpy(active_cpu_prev.data, prev_pts_.data(), N * sizeof(cv::Point2f));
-        d_prev_pts = mem_prev_pts.createGpuMatHeader().colRange(0, N);
-        d_cur_pts  = mem_cur_pts.createGpuMatHeader().colRange(0, N); 
-        d_status   = mem_status.createGpuMatHeader().colRange(0, N);
-        d_err      = mem_err.createGpuMatHeader().colRange(0, N);
+        cv::Mat prev_pts_mat(1, prev_pts_.size(), CV_32FC2, (void *)&prev_pts_[0]);
+        d_prev_pts.upload(prev_pts_mat);
 
         // [GPU] 3. Handle Prediction (IMU guess)
         if (has_prediction_) {
-            //old upload/download method
-            //cv::Mat predict_pts_mat(1, predict_pts_.size(), CV_32FC2, (void *)&predict_pts_[0]);
-            //d_cur_pts.upload(predict_pts_mat);
-
-            //shared memory approach
-            cv::Mat cpu_cur_pts = mem_cur_pts.createMatHeader();
-            cv::Mat active_cpu_cur = cpu_cur_pts.colRange(0, predict_pts_.size());
-            memcpy(active_cpu_cur.data, predict_pts_.data(), predict_pts_.size() * sizeof(cv::Point2f)); //copy data from vector to shared memory
-            //d_prev_pts = mem_prev_pts.createGpuMatHeader().colRange(0, prev_pts_.size()); //set the gpu view
+            // If we have a guess, upload it as the "initial flow" for d_cur_pts
+            cv::Mat predict_pts_mat(1, predict_pts_.size(), CV_32FC2, (void *)&predict_pts_[0]);
+            d_cur_pts.upload(predict_pts_mat);
+            
             // Run LK with USE_INITIAL_FLOW flag
             gpu_lk_tracker->setUseInitialFlow(true);
             gpu_lk_tracker->calc(d_prev_img, d_cur_img, d_prev_pts, d_cur_pts, d_status, d_err);
@@ -398,52 +387,64 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
         if (params.flow_back) {
             // Track BACKWARDS: Current -> Previous
             // We use the 'd_cur_pts' we just calculated as the starting point
-            d_reverse_pts = mem_reverse_pts.createGpuMatHeader().colRange(0, N);
-            d_reverse_status = mem_reverse_status.createGpuMatHeader().colRange(0, N);
-            gpu_lk_tracker->setUseInitialFlow(false); //prediction for reverse? nope.
+            gpu_lk_tracker->setUseInitialFlow(false); // Usually no prediction for reverse
             gpu_lk_tracker->calc(d_cur_img, d_prev_img, d_cur_pts, d_reverse_pts, d_reverse_status);
-        }
 
-        cudaDeviceSynchronize();
-        cv::Mat cpu_cur_pts_view = mem_cur_pts.createMatHeader().colRange(0, N);
-        cv::Mat cpu_status_view  = mem_status.createMatHeader().colRange(0, N);
-        cv::Point2f* cur_ptr = (cv::Point2f*)cpu_cur_pts_view.data;
-        uchar* status_ptr    = (uchar*)cpu_status_view.data;
-        vector<uchar> final_status(N, 0);
+            // [GPU -> CPU] Download everything to do the distance check
+            // Logic is easier on CPU than writing a custom CUDA kernel
+            vector<cv::Point2f> tmp_cur_pts(d_cur_pts.cols);
+            vector<cv::Point2f> tmp_rev_pts(d_reverse_pts.cols);
+            vector<uchar> tmp_status(d_status.cols);
+            vector<uchar> tmp_rev_status(d_reverse_status.cols);
 
-        if (params.flow_back) {
-            cv::Mat cpu_rev_pts_view = mem_reverse_pts.createMatHeader().colRange(0, N);
-            cv::Mat cpu_rev_status_view = mem_reverse_status.createMatHeader().colRange(0, N);
+            cv::Mat tmp_mat;
             
-            cv::Point2f* rev_ptr = (cv::Point2f*)cpu_rev_pts_view.data;
-            uchar* rev_status_ptr = (uchar*)cpu_rev_status_view.data;
+            d_cur_pts.download(tmp_mat);
+            tmp_mat.copyTo(cv::Mat(1, d_cur_pts.cols, CV_32FC2, &tmp_cur_pts[0]));
 
-            for (int i = 0; i < N; i++) {
-                // Accessing shared memory directly via pointers
-                if (status_ptr[i] && rev_status_ptr[i] && 
-                    distance(prev_pts_[i], rev_ptr[i]) <= 0.5) {
-                    final_status[i] = 1;
-                    cur_pts_.push_back(cur_ptr[i]); // Fill result vector
+            d_reverse_pts.download(tmp_mat);
+            tmp_mat.copyTo(cv::Mat(1, d_reverse_pts.cols, CV_32FC2, &tmp_rev_pts[0]));
+
+            d_status.download(tmp_mat);
+            tmp_mat.copyTo(cv::Mat(1, d_status.cols, CV_8UC1, &tmp_status[0]));
+            
+            d_reverse_status.download(tmp_mat);
+            tmp_mat.copyTo(cv::Mat(1, d_reverse_status.cols, CV_8UC1, &tmp_rev_status[0]));
+
+            // Verify Tracks
+            cur_pts_ = tmp_cur_pts; // Update class member
+            status = tmp_status;    // Update local status
+            
+            for (size_t i = 0; i < status.size(); i++) {
+                if (status[i] && tmp_rev_status[i] &&
+                    distance(prev_pts_[i], tmp_rev_pts[i]) <= 0.5) {
+                    status[i] = 1;
                 } else {
-                    final_status[i] = 0;
+                    status[i] = 0;
                 }
             }
-        } else {
-            // No backward check, just trust forward status
-            for (int i = 0; i < N; i++) {
-                if (status_ptr[i]) {
-                    final_status[i] = 1;
-                    cur_pts_.push_back(cur_ptr[i]);
-                } else {
-                    final_status[i] = 0;
-                }
-            }
+        }
+        else {
+             // If no flow_back, just download the forward results
+             vector<cv::Point2f> tmp_cur_pts(d_cur_pts.cols);
+             vector<uchar> tmp_status(d_status.cols);
+             
+             cv::Mat tmp_mat;
+             d_cur_pts.download(tmp_mat);
+             tmp_mat.copyTo(cv::Mat(1, d_cur_pts.cols, CV_32FC2, &tmp_cur_pts[0]));
+             
+             d_status.download(tmp_mat);
+             tmp_mat.copyTo(cv::Mat(1, d_status.cols, CV_8UC1, &tmp_status[0]));
+             
+             cur_pts_ = tmp_cur_pts;
+             status = tmp_status;
         }
 
         for (int i = 0; i < static_cast<int>(cur_pts_.size()); i++)
             if (status[i] && !inBorder(cur_pts_[i])) status[i] = 0;
             
         reduceVector(prev_pts_, status);
+        reduceVector(cur_pts_, status);
         reduceVector(ids_, status);
         reduceVector(track_cnt_, status);
         ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
@@ -494,7 +495,7 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
     cur_un_pts_ = undistortedPts(cur_pts_, m_camera_[0]);
     pts_velocity_ = ptsVelocity(ids_, cur_un_pts_, cur_un_pts_map_, prev_un_pts_map_);
 
-    // --- STEREO TRACKING (Right Camera) --- //this is not developed might crash idc
+    // --- STEREO TRACKING (Right Camera) ---
     if (!_img1.empty() && stereo_cam_) {
         ids_right_.clear();
         cur_right_pts_.clear();

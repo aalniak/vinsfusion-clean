@@ -29,7 +29,7 @@
 #include <nav_msgs/Path.h>
 #include <ros/ros.h>
 #include <stdio.h>
-
+#include "NetVLADLoop.h"
 #include <eigen3/Eigen/Dense>
 #include <mutex>
 #include <opencv2/opencv.hpp>
@@ -85,7 +85,7 @@ class PoseGraph {
   std::mutex m_drift;
   std::thread t_optimization;
   std::queue<int> optimize_buf;
-
+  NetVLADLoop* netvlad;
   int global_index;
   int sequence_cnt;
   vector<bool> sequence_loop;

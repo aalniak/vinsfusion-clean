@@ -268,7 +268,7 @@ void process() {
       // printf(" point time %f \n", point_msg->header.stamp.toSec());
       // printf(" image time %f \n", image_msg->header.stamp.toSec());
       //  skip fisrt few
-      if (skip_first_idx < SKIP_FIRST_CNT) {
+      if (skip_first_idx < 0) {
         skip_first_idx++;
         continue;
       }
@@ -330,6 +330,9 @@ void process() {
             point_2d_uv, point_2d_normal, point_id, sequence, *params);
         m_process.lock();
         start_flag = 1;
+        std::cout << "Adding KeyFrame " << frame_index
+                  << " at time " << pose_msg->header.stamp.toSec()
+                  << " to PoseGraph." << std::endl;
         posegraph->addKeyFrame(keyframe, 1);
         m_process.unlock();
         frame_index++;

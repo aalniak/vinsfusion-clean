@@ -90,13 +90,14 @@ class KeyFrame {
   void updateVioPose(const Eigen::Vector3d &_T_w_i,
                      const Eigen::Matrix3d &_R_w_i);
   void updateLoop(Eigen::Matrix<double, 8, 1> &_loop_info);
-
+  void pubScore(KeyFrame *old_kf, float score);
   Eigen::Vector3d getLoopRelativeT();
   double getLoopRelativeYaw();
   Eigen::Quaterniond getLoopRelativeQ();
-
+  float score = 0.0;
+  int weak_index = -1;
   Parameters &params;
-
+  std::vector<float> netvlad_desc;
   double time_stamp;
   int index;
   int local_index;

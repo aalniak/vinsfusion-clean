@@ -52,9 +52,17 @@ if (USE_CUDA)
   endif()
 endif()
 
+set(CUDA_SEARCH_PATHS 
+    "/usr/local/cuda/lib64" 
+    "/usr/local/cuda/lib"
+    "/usr/lib/aarch64-linux-gnu"
+)
+
 find_package(CUDA REQUIRED)
 find_library(TENSORRT_LIB nvinfer)
-find_library(CUDART_LIB cudart)
+find_library(NVINFER_LIB nvinfer HINTS ${CUDA_SEARCH_PATHS})
+find_library(CUBLAS_LIB cublas HINTS ${CUDA_SEARCH_PATHS})
+find_library(CUDART_LIB cudart HINTS ${CUDA_SEARCH_PATHS})
 
 ## Find required packages
 find_package(catkin REQUIRED COMPONENTS
@@ -181,6 +189,7 @@ add_executable(
   src/node/node_loop_fusion.cpp
   src/loop_fusion/pose_graph.cpp
   src/loop_fusion/keyframe.cpp
+  src/loop_fusion/NetVLADLoop.cpp
   src/loop_fusion/parameters.cpp
   src/loop_fusion/utility/CameraPoseVisualization.cpp
   src/DBoW/BowVector.cpp
@@ -205,6 +214,9 @@ target_link_libraries(loop_fusion_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
+  ${NVINFER_LIB}  
+  ${CUBLAS_LIB}    
+  ${CUDART_LIB}    
 )
 
 add_executable(

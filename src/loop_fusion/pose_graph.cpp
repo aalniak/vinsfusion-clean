@@ -29,6 +29,9 @@ PoseGraph::PoseGraph(Parameters &params) : t_optimization(), params(params) {
   sequence_loop.push_back(0);
   base_sequence = 1;
   use_imu = 0;
+  std::string engine_path = "/datasets/netvlad_final.engine"; 
+  std::cout << "NetVLAD engine path: " << engine_path << std::endl;
+  netvlad = new NetVLADLoop(engine_path);
 }
 
 PoseGraph::~PoseGraph() {
@@ -58,8 +61,8 @@ void PoseGraph::setIMUFlag(bool _use_imu) {
 }
 
 void PoseGraph::loadVocabulary(std::string voc_path) {
-  voc = new BriefVocabulary(voc_path);
-  db.setVocabulary(*voc, false, 0);
+  //voc = new BriefVocabulary(voc_path);
+  //db.setVocabulary(*voc, false, 0);
 }
 
 void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
@@ -144,6 +147,14 @@ void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
       m_optimize_buf.unlock();
     }
   }
+  else {
+    if (cur_kf->score > 0.4) {
+      int index = cur_kf->weak_index;
+      KeyFrame *old_kf = getKeyFrame(index);
+      cur_kf->pubScore(old_kf, cur_kf->score);
+    }
+  }
+  
   m_keyframelist.lock();
   Vector3d P;
   Matrix3d R;
@@ -305,74 +316,35 @@ int PoseGraph::detectLoop(KeyFrame *keyframe, int frame_index) {
   }
   TicToc tmp_t;
   // first query; then add this frame into database!
-  QueryResults ret;
-  TicToc t_query;
-  db.query(keyframe->brief_descriptors, ret, 4, frame_index - 50);
-  // printf("query time: %f", t_query.toc());
-  // cout << "Searching for Image " << frame_index << ". " << ret << endl;
+  //QueryResults ret;
+  //TicToc t_query;
+  //db.query(keyframe->brief_descriptors, ret, 4, frame_index - 50);
+  //// printf("query time: %f", t_query.toc());
+  //// cout << "Searching for Image " << frame_index << ". " << ret << endl;
+//
+  //TicToc t_add;
+  //db.add(keyframe->brief_descriptors);
+  //// printf("add feature time: %f", t_add.toc());
+  ////  ret[0] is the nearest neighbour's score. threshold change with neighour
+  ////  score
 
-  TicToc t_add;
-  db.add(keyframe->brief_descriptors);
-  // printf("add feature time: %f", t_add.toc());
-  //  ret[0] is the nearest neighbour's score. threshold change with neighour
-  //  score
-  bool find_loop = false;
-  cv::Mat loop_result;
-  if (params.save_image) {
-    loop_result = compressed_image.clone();
-    if (ret.size() > 0)
-      putText(loop_result, "neighbour score:" + to_string(ret[0].Score),
-              cv::Point2f(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.5,
-              cv::Scalar(255));
+  std::vector<float> current_desc = netvlad->extract_and_add(keyframe->image, frame_index);
+  std::pair<int, float> result = netvlad->query(50);
+  int match_index = result.first;
+  float score = result.second;
+  keyframe->score = score;
+  keyframe->weak_index = match_index;
+  std::cout << "Highest score: " << score << " from frame " << match_index << std::endl;
+  if (match_index != -1 && score > 0.60) { // Tune this threshold
+      std::cout << "NetVLAD Loop detected! @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+      std::cout << "Loop detection time: " << tmp_t.toc() << " ms" << std::endl;
+      std::cout << "Loop detection score: " << score << std::endl;
+      std::cout << "Loop detected: Current Frame " << frame_index << " matched with Frame " << match_index << " with score " << score << std::endl;
+      return match_index;
   }
-  // visual loop result
-  if (params.save_image) {
-    for (unsigned i = 0; i < ret.size(); i++) {
-      int tmp_index = ret[i].Id;
-      auto it = image_pool.find(tmp_index);
-      cv::Mat tmp_image = (it->second).clone();
-      putText(tmp_image,
-              "index:  " + to_string(tmp_index) +
-                  "loop score:" + to_string(ret[i].Score),
-              cv::Point2f(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.5,
-              cv::Scalar(255));
-      cv::hconcat(loop_result, tmp_image, loop_result);
-    }
-  }
-  // a good match with its nerghbour
-  if (ret.size() >= 1 && ret[0].Score > 0.05)
-    for (unsigned int i = 1; i < ret.size(); i++) {
-      // if (ret[i].Score > ret[0].Score * 0.3)
-      if (ret[i].Score > 0.015) {
-        find_loop = true;
-        int tmp_index = ret[i].Id;
-        if (params.save_image && 0) {
-          auto it = image_pool.find(tmp_index);
-          cv::Mat tmp_image = (it->second).clone();
-          putText(tmp_image, "loop score:" + to_string(ret[i].Score),
-                  cv::Point2f(10, 50), cv::FONT_HERSHEY_SIMPLEX, 0.4,
-                  cv::Scalar(255));
-          cv::hconcat(loop_result, tmp_image, loop_result);
-        }
-      }
-    }
-  /*
-      if (params.save_image)
-      {
-          cv::imshow("loop_result", loop_result);
-          cv::waitKey(20);
-      }
-  */
-  if (find_loop && frame_index > 50) {
-    int min_index = -1;
-    for (unsigned i = 0; i < ret.size(); i++) {
-      if (min_index == -1 ||
-          ((int)ret[i].Id < min_index && ret[i].Score > 0.015))
-        min_index = ret[i].Id;
-    }
-    return min_index;
-  } else
-    return -1;
+  std::cout << "No loop detected for Frame " << frame_index << std::endl;
+  return -1;
+  
 }
 
 void PoseGraph::addKeyFrameIntoVoc(KeyFrame *keyframe) {
@@ -387,7 +359,7 @@ void PoseGraph::addKeyFrameIntoVoc(KeyFrame *keyframe) {
     image_pool[keyframe->index] = compressed_image;
   }
 
-  db.add(keyframe->brief_descriptors);
+  netvlad->extract_and_add(keyframe->image, keyframe->index);
 }
 
 void PoseGraph::optimize4DoF() {

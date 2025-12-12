@@ -251,6 +251,119 @@ void KeyFrame::PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
   PnP_T_old = T_w_c_old - PnP_R_old * tic;
 }
 
+void KeyFrame::pubScore(KeyFrame *old_kf, float score) {
+  TicToc tmp_t;
+  // printf("find Connection\n");
+  vector<cv::Point2f> matched_2d_cur, matched_2d_old;
+  vector<cv::Point2f> matched_2d_cur_norm, matched_2d_old_norm;
+  vector<cv::Point3f> matched_3d;
+  vector<double> matched_id;
+  vector<uchar> status;
+
+  matched_3d = point_3d;
+  matched_2d_cur = point_2d_uv;
+  matched_2d_cur_norm = point_2d_norm;
+  matched_id = point_id;
+
+  TicToc t_match;
+
+  // printf("search by des\n");
+  searchByBRIEFDes(matched_2d_old, matched_2d_old_norm, status,
+                   old_kf->brief_descriptors, old_kf->keypoints,
+                   old_kf->keypoints_norm);
+  reduceVector(matched_2d_cur, status);
+  reduceVector(matched_2d_old, status);
+  reduceVector(matched_2d_cur_norm, status);
+  reduceVector(matched_2d_old_norm, status);
+  reduceVector(matched_3d, status);
+  reduceVector(matched_id, status);
+  // printf("search by des finish\n");
+
+
+  status.clear();
+
+
+  Eigen::Vector3d PnP_T_old;
+  Eigen::Matrix3d PnP_R_old;
+  Eigen::Vector3d relative_t;
+  Quaterniond relative_q;
+  double relative_yaw;
+  if ((int)matched_2d_cur.size() > MIN_LOOP_NUM) {
+    status.clear();
+    PnPRANSAC(matched_2d_old_norm, matched_3d, status, PnP_T_old, PnP_R_old);
+    reduceVector(matched_2d_cur, status);
+    reduceVector(matched_2d_old, status);
+    reduceVector(matched_2d_cur_norm, status);
+    reduceVector(matched_2d_old_norm, status);
+    reduceVector(matched_3d, status);
+    reduceVector(matched_id, status);
+
+    if (params.save_image) {
+      int gap = 10;
+      cv::Mat gap_image(params.row, gap, CV_8UC1, cv::Scalar(255, 255, 255));
+      cv::Mat gray_img, loop_match_img;
+      cv::Mat old_img = old_kf->image;
+      cv::hconcat(image, gap_image, gap_image);
+      cv::hconcat(gap_image, old_img, gray_img);
+      cvtColor(gray_img, loop_match_img, cv::COLOR_GRAY2RGB);
+      for (int i = 0; i < (int)matched_2d_cur.size(); i++) {
+        cv::Point2f cur_pt = matched_2d_cur[i];
+        cv::circle(loop_match_img, cur_pt, 5, cv::Scalar(0, 255, 0));
+      }
+      for (int i = 0; i < (int)matched_2d_old.size(); i++) {
+        cv::Point2f old_pt = matched_2d_old[i];
+        old_pt.x += (params.col + gap);
+        cv::circle(loop_match_img, old_pt, 5, cv::Scalar(0, 255, 0));
+      }
+      for (int i = 0; i < (int)matched_2d_cur.size(); i++) {
+        cv::Point2f old_pt = matched_2d_old[i];
+        old_pt.x += (params.col + gap);
+        cv::line(loop_match_img, matched_2d_cur[i], old_pt,
+                 cv::Scalar(0, 255, 0), 2, 8, 0);
+      }
+      cv::Mat notation(50, params.col + gap + params.col, CV_8UC3,
+                       cv::Scalar(255, 255, 255));
+      putText(notation,
+              "current frame: " + to_string(index) +
+                  "  sequence: " + to_string(sequence),
+              cv::Point2f(20, 30), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(255),
+              3);
+
+      putText(notation,
+              "previous frame: " + to_string(old_kf->index) +
+                  "  sequence: " + to_string(old_kf->sequence) + " score: " + to_string(score),
+              cv::Point2f(20 + params.col + gap, 30), cv::FONT_HERSHEY_SIMPLEX,
+              1, cv::Scalar(255), 3);
+      cv::vconcat(notation, loop_match_img, loop_match_img);
+
+      /*
+      ostringstream path;
+      path <<  "/home/tony-ws1/raw_data/loop_image/"
+              << index << "-"
+              << old_kf->index << "-" << "3pnp_match.jpg";
+      cv::imwrite( path.str().c_str(), loop_match_img);
+      */
+      if ((int)matched_2d_cur.size() > MIN_LOOP_NUM || true)  {
+        /*
+        cv::imshow("loop connection",loop_match_img);
+        cv::waitKey(10);
+        */
+        
+        cv::Mat thumbimage;
+        cv::resize(loop_match_img, thumbimage,
+                   cv::Size(loop_match_img.cols / 2, loop_match_img.rows / 2));
+        sensor_msgs::ImagePtr msg =
+            cv_bridge::CvImage(std_msgs::Header(), "bgr8", thumbimage)
+                .toImageMsg();
+        msg->header.stamp = ros::Time(time_stamp);
+        pub_match_img.publish(msg);
+      }
+    }
+
+  }
+
+}
+
 bool KeyFrame::findConnection(KeyFrame *old_kf) {
   TicToc tmp_t;
   // printf("find Connection\n");
@@ -454,11 +567,12 @@ reduceVector(matched_id, status);
               << old_kf->index << "-" << "3pnp_match.jpg";
       cv::imwrite( path.str().c_str(), loop_match_img);
       */
-      if ((int)matched_2d_cur.size() > MIN_LOOP_NUM) {
+      if ((int)matched_2d_cur.size() > MIN_LOOP_NUM || true)  {
         /*
         cv::imshow("loop connection",loop_match_img);
         cv::waitKey(10);
         */
+        
         cv::Mat thumbimage;
         cv::resize(loop_match_img, thumbimage,
                    cv::Size(loop_match_img.cols / 2, loop_match_img.rows / 2));
