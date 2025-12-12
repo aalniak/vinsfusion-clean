@@ -52,7 +52,8 @@ struct Parameters {
   std::vector<Eigen::Vector3d> tic;
 
   Eigen::Vector3d g{0.0, 0.0, 9.8};
-
+  int netvlad;
+  float netvlad_threshold;
   double bias_acc_threshold;
   double bias_gyr_threshold;
   double solver_time;
