@@ -312,8 +312,8 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         TicToc t_proc;
         
         // [OPTIMIZATION A]: Math on Small Float Image (518x518)
-        cv::Mat metric_depth;
-        cv::divide(1.0, raw_inv_depth, metric_depth);
+        cv::Mat metric_depth = raw_inv_depth;
+        //v::divide(1.0, raw_inv_depth, metric_depth);
 
         // --- OPTIMIZATION: STRIDED SAMPLING (Approx 0.05ms) ---
         // We sample ~600 pixels to estimate the distribution.

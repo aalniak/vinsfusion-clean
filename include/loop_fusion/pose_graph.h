@@ -46,6 +46,14 @@ using namespace DBoW2;
 
 namespace vins::loop_fusion {
 
+struct LoopStat {
+    int current_id;
+    int old_id;
+    double score;
+    double cur_ts; 
+    double old_ts; 
+};
+
 class PoseGraph {
  public:
   PoseGraph(Parameters &params);
@@ -58,7 +66,8 @@ class PoseGraph {
   KeyFrame *getKeyFrame(int index);
 
   Parameters &params;
-
+  int loop_occured = 0;
+  
   nav_msgs::Path path[10];
   nav_msgs::Path base_path;
   CameraPoseVisualization *posegraph_visualization;
@@ -71,7 +80,8 @@ class PoseGraph {
   // world frame( base sequence or first sequence)<----> cur sequence frame
   Vector3d w_t_vio;
   Matrix3d w_r_vio;
-
+  std::vector<LoopStat> loop_stats_registry;
+  double last_loop_score = 0.0;
  private:
   int detectLoop(KeyFrame *keyframe, int frame_index);
   void addKeyFrameIntoVoc(KeyFrame *keyframe);
@@ -85,7 +95,7 @@ class PoseGraph {
   std::mutex m_drift;
   std::thread t_optimization;
   std::queue<int> optimize_buf;
-
+  std::vector<std::pair<int, int>> loop_history;
   int global_index;
   int sequence_cnt;
   vector<bool> sequence_loop;

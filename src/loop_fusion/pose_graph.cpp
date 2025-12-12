@@ -28,6 +28,7 @@ PoseGraph::PoseGraph(Parameters &params) : t_optimization(), params(params) {
   sequence_cnt = 0;
   sequence_loop.push_back(0);
   base_sequence = 1;
+  loop_history.clear();
   use_imu = 0;
 }
 
@@ -35,6 +36,15 @@ PoseGraph::~PoseGraph() {
   if (t_optimization.joinable()) {
     t_optimization.join();
   }
+  printf("\n\n======== FINAL LOOP CLOSURE REPORT ========\n");
+  printf("Total Loops: %lu\n", loop_stats_registry.size());
+  printf("Curr_Time\tOld_Time\tScore\n"); // Updated Header
+  
+  for (const auto& s : loop_stats_registry) {
+      // %.6f prints the timestamp with microsecond precision
+      printf("-> %.6f\t%.6f\t%.4f\n", s.cur_ts, s.old_ts, s.score);
+  }
+  printf("===========================================\n\n");
 }
 
 void PoseGraph::registerPub(ros::NodeHandle &n) {
@@ -95,6 +105,16 @@ void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
     KeyFrame *old_kf = getKeyFrame(loop_index);
 
     if (cur_kf->findConnection(old_kf)) {
+      LoopStat stat;
+      
+      stat.current_id = cur_kf->index;
+      stat.old_id = loop_index;
+      stat.score = last_loop_score;
+      stat.cur_ts = cur_kf->time_stamp; // Get current time
+      stat.old_ts = old_kf->time_stamp; // Get old time from the pointer
+      
+      loop_stats_registry.push_back(stat);
+
       if (earliest_loop_index > loop_index || earliest_loop_index == -1)
         earliest_loop_index = loop_index;
 
@@ -142,6 +162,7 @@ void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
       m_optimize_buf.lock();
       optimize_buf.push(cur_kf->index);
       m_optimize_buf.unlock();
+      loop_occured++;
     }
   }
   m_keyframelist.lock();
@@ -365,10 +386,12 @@ int PoseGraph::detectLoop(KeyFrame *keyframe, int frame_index) {
   */
   if (find_loop && frame_index > 50) {
     int min_index = -1;
+    double match_score = 0.0; // Variable to hold the score
     for (unsigned i = 0; i < ret.size(); i++) {
-      if (min_index == -1 ||
-          ((int)ret[i].Id < min_index && ret[i].Score > 0.015))
+      if (min_index == -1 || ((int)ret[i].Id < min_index && ret[i].Score > 0.015)){
         min_index = ret[i].Id;
+        last_loop_score = ret[i].Score;
+      }
     }
     return min_index;
   } else
