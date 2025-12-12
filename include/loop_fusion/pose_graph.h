@@ -45,7 +45,13 @@ using namespace DVision;
 using namespace DBoW2;
 
 namespace vins::loop_fusion {
-
+struct LoopStat {
+    int current_id;
+    int old_id;
+    double score;
+    double cur_ts; // Current Timestamp
+    double old_ts; // Old Timestamp (New field)
+};
 class PoseGraph {
  public:
   PoseGraph(Parameters &params);
@@ -56,7 +62,8 @@ class PoseGraph {
   void loadVocabulary(std::string voc_path);
   void setIMUFlag(bool _use_imu);
   KeyFrame *getKeyFrame(int index);
-
+  std::vector<LoopStat> loop_stats_registry;
+  double last_loop_score = 0.0;
   Parameters &params;
 
   nav_msgs::Path path[10];

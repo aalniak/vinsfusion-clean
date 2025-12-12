@@ -21,7 +21,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   if (!fsSettings.isOpened()) {
     std::cerr << "ERROR: Wrong path to settings" << std::endl;
   }
-
+  fsSettings["netvlad_engine_path"] >> netvlad_engine_path;
   fsSettings["image0_topic"] >> image0_topic;
   fsSettings["image1_topic"] >> image1_topic;
   max_cnt = fsSettings["max_cnt"];

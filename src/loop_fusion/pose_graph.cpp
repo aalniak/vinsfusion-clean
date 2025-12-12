@@ -29,7 +29,7 @@ PoseGraph::PoseGraph(Parameters &params) : t_optimization(), params(params) {
   sequence_loop.push_back(0);
   base_sequence = 1;
   use_imu = 0;
-  std::string engine_path = "/datasets/netvlad_final.engine"; 
+  std::string engine_path = params.netvlad_engine_path; 
   std::cout << "NetVLAD engine path: " << engine_path << std::endl;
   netvlad = new NetVLADLoop(engine_path);
 }
@@ -38,6 +38,15 @@ PoseGraph::~PoseGraph() {
   if (t_optimization.joinable()) {
     t_optimization.join();
   }
+  printf("\n\n======== FINAL LOOP CLOSURE REPORT ========\n");
+  printf("Total Loops: %lu\n", loop_stats_registry.size());
+  printf("Curr_Time\tOld_Time\tScore\n"); // Updated Header
+  
+  for (const auto& s : loop_stats_registry) {
+      // %.6f prints the timestamp with microsecond precision
+      printf("-> %.6f\t%.6f\t%.4f\n", s.cur_ts, s.old_ts, s.score);
+  }
+  printf("===========================================\n\n");
 }
 
 void PoseGraph::registerPub(ros::NodeHandle &n) {
@@ -96,7 +105,14 @@ void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
   if (loop_index != -1) {
     // printf(" %d detect loop with %d \n", cur_kf->index, loop_index);
     KeyFrame *old_kf = getKeyFrame(loop_index);
-
+    LoopStat stat;
+    stat.current_id = cur_kf->index;
+    stat.old_id = loop_index;
+    stat.score = last_loop_score;
+    stat.cur_ts = cur_kf->time_stamp; // Get current time
+    stat.old_ts = old_kf->time_stamp;
+      
+    loop_stats_registry.push_back(stat);
     if (cur_kf->findConnection(old_kf)) {
       if (earliest_loop_index > loop_index || earliest_loop_index == -1)
         earliest_loop_index = loop_index;
@@ -332,6 +348,7 @@ int PoseGraph::detectLoop(KeyFrame *keyframe, int frame_index) {
   std::pair<int, float> result = netvlad->query(50);
   int match_index = result.first;
   float score = result.second;
+ 
   keyframe->score = score;
   keyframe->weak_index = match_index;
   std::cout << "Highest score: " << score << " from frame " << match_index << std::endl;
@@ -340,6 +357,8 @@ int PoseGraph::detectLoop(KeyFrame *keyframe, int frame_index) {
       std::cout << "Loop detection time: " << tmp_t.toc() << " ms" << std::endl;
       std::cout << "Loop detection score: " << score << std::endl;
       std::cout << "Loop detected: Current Frame " << frame_index << " matched with Frame " << match_index << " with score " << score << std::endl;
+      last_loop_score = score;
+
       return match_index;
   }
   std::cout << "No loop detected for Frame " << frame_index << std::endl;
