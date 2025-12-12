@@ -86,12 +86,24 @@ class FeatureTracker {
     //add gpu-specific items
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> gpu_lk_tracker;
   cv::Ptr<cv::cuda::CornersDetector> gpu_detector;
-
+  
   cv::cuda::GpuMat d_prev_img, d_cur_img, d_right_img;
   cv::cuda::GpuMat d_prev_pts, d_cur_pts, d_status, d_err;
   cv::cuda::GpuMat d_reverse_pts, d_reverse_status;
   cv::cuda::GpuMat d_mask;
   cv::cuda::GpuMat d_new_pts; // For feature detection
+  
+  // No upload/download, shared memory
+  cv::cuda::HostMem mem_cur_img;      // Buffer for current image
+  cv::cuda::HostMem mem_prev_pts;     // Buffer for sending points to GPU
+  cv::cuda::HostMem mem_cur_pts;      // Buffer for receiving points from GPU
+  cv::cuda::HostMem mem_status;       // Buffer for status
+  cv::cuda::HostMem mem_err;          // Buffer for error
+  cv::cuda::HostMem mem_reverse_pts;
+  cv::cuda::HostMem mem_reverse_status;
+  cv::Mat cpu_cur_img_view;           // CPU way to see image
+  cv::cuda::GpuMat gpu_cur_img_view;  // GPU way to see image
+
   vector<cv::Point2f> predict_pts_;
   vector<cv::Point2f> predict_pts_debug_;
   vector<cv::Point2f> prev_pts_, cur_pts_, cur_right_pts_;

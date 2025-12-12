@@ -691,7 +691,7 @@ void Estimator::processImage(
                     mCache.lock();
 
                     cv::Mat resized_depth;
-                    cv::resize(raw_depth_518, resized_depth, cv::Size(1280, 800));
+                    cv::resize(raw_depth_518, resized_depth, cv::Size(params.col, params.row));
 
                     frame.depth_map = resized_depth.clone();
                       if (!frame.depth_map.empty()) {
@@ -753,7 +753,7 @@ void Estimator::processImage(
         cv::Mat raw_depth_518 = depthInferer->infer(raw_img);
         // 2. Resize to match VINS frame (1280x720)
         // VINS expects features coordinates in the original resolution
-        cv::resize(raw_depth_518, current_depth, cv::Size(1280, 800));
+        cv::resize(raw_depth_518, current_depth, cv::Size(params.col, params.row));
         
         // --- DEBUG BLOCK START ---
         //double minVal, maxVal;
