@@ -71,6 +71,7 @@ struct Parameters {
   int stereo;
   int use_imu;
   int multiple_thread;
+  std::string depth_engine_path;
   std::string netvlad_engine_path;
   std::string image0_topic, image1_topic;
   std::string fisheye_mask;

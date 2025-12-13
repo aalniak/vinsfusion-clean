@@ -127,7 +127,7 @@ Estimator::Estimator(Parameters &params)
       initial_ex_rotation{params} {
   ROS_INFO("init begins");
   clearState();
-  std::string engine_path = "/depth/depth_anything_ac_16.engine";
+  std::string engine_path = params.depth_engine_path;
   depthInferer = std::make_shared<DepthInfer>(engine_path);
   std::cout << "Engine is loaded" << std::endl;
 }

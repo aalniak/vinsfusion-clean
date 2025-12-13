@@ -82,8 +82,8 @@ void PoseGraph::setIMUFlag(bool _use_imu) {
 }
 
 void PoseGraph::loadVocabulary(std::string voc_path) {
-  //voc = new BriefVocabulary(voc_path);
-  //db.setVocabulary(*voc, false, 0);
+  voc = new BriefVocabulary(voc_path);
+  db.setVocabulary(*voc, false, 0);
 }
 
 void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
@@ -442,7 +442,7 @@ cv::Mat compressed_image;
     int min_index = -1;
     double match_score = 0.0; // Variable to hold the score
     for (unsigned i = 0; i < ret.size(); i++) {
-      if (min_index == -1 || ((int)ret[i].Id < min_index && ret[i].Score > 0.015)){
+      if (min_index == -1 || ((int)ret[i].Id < min_index && ret[i].Score > 0.015)){ //DBoW adjustable threshold
         min_index = ret[i].Id;
         last_loop_score = ret[i].Score;
       }
