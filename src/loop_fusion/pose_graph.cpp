@@ -29,15 +29,23 @@ PoseGraph::PoseGraph(Parameters &params) : t_optimization(), params(params) {
   sequence_loop.push_back(0);
   base_sequence = 1;
   use_imu = 0;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  std::cout << "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+  
+  if (params.netvlad){
   std::string engine_path = params.netvlad_engine_path; 
   std::cout << "NetVLAD engine path: " << engine_path << std::endl;
-  netvlad = new NetVLADLoop(engine_path);
+  netvlad = new NetVLADLoop(engine_path);}
 }
 
 PoseGraph::~PoseGraph() {
-  if (t_optimization.joinable()) {
-    t_optimization.join();
-  }
   printf("\n\n======== FINAL LOOP CLOSURE REPORT ========\n");
   printf("Total Loops: %lu\n", loop_stats_registry.size());
   printf("Curr_Time\tOld_Time\tScore\n"); // Updated Header
@@ -47,6 +55,10 @@ PoseGraph::~PoseGraph() {
       printf("-> %.6f\t%.6f\t%.4f\n", s.cur_ts, s.old_ts, s.score);
   }
   printf("===========================================\n\n");
+  if (t_optimization.joinable()) {
+    t_optimization.join();
+  }
+  
 }
 
 void PoseGraph::registerPub(ros::NodeHandle &n) {
@@ -76,6 +88,8 @@ void PoseGraph::loadVocabulary(std::string voc_path) {
 
 void PoseGraph::addKeyFrame(KeyFrame *cur_kf, bool flag_detect_loop) {
   // shift to base frame
+  std::cout << "Adding keyframe " << cur_kf->index << " at time "
+            << cur_kf->time_stamp << std::endl;
   Vector3d vio_P_cur;
   Matrix3d vio_R_cur;
   if (sequence_cnt != cur_kf->sequence) {
@@ -451,8 +465,10 @@ void PoseGraph::addKeyFrameIntoVoc(KeyFrame *keyframe) {
             cv::Scalar(255));
     image_pool[keyframe->index] = compressed_image;
   }
-
+  if (params.netvlad)
   netvlad->extract_and_add(keyframe->image, keyframe->index);
+  else
+  db.add(keyframe->brief_descriptors);
 }
 
 void PoseGraph::optimize4DoF() {
@@ -618,8 +634,10 @@ void PoseGraph::optimize4DoF() {
       updatePath();
     }
 
-    std::chrono::milliseconds dura(2000);
-    std::this_thread::sleep_for(dura);
+    for (int i = 0; i < 20; i++) { // 20 * 100ms = 2000ms
+    if (!ros::ok()) break;     // Break immediately if shutdown requested
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
   }
   return;
 }

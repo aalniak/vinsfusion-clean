@@ -169,9 +169,12 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
       if (succ_num < 10)
         cv::calcOpticalFlowPyrLK(prev_img_, cur_img_, prev_pts_, cur_pts_,
                                  status, err, cv::Size(21, 21), 3);
-    } else
+    } else {
       cv::calcOpticalFlowPyrLK(prev_img_, cur_img_, prev_pts_, cur_pts_, status,
                                err, cv::Size(21, 21), 3);
+      std::cout << "time it takes for optical flow: " << t_o.toc() << " ms"
+                << std::endl;
+      }
     // reverse check
     if (params.flow_back) {
       vector<uchar> reverse_status;
@@ -191,6 +194,7 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
         } else
           status[i] = 0;
       }
+      std::cout << "time it takes for reverse optical flow: " << t_o.toc() << " ms" << std::endl;
     }
 
     for (int i = 0; i < static_cast<int>(cur_pts_.size()); i++)
@@ -231,14 +235,15 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
       }
     }
 
-    ROS_DEBUG("detect feature costs: %f ms", t_t.toc());
+    ROS_INFO("detect feature costs: %f ms", t_t.toc());
     // printf("feature cnt after add %d\n", (int)ids.size());
   }
-
+  TicToc t_und;
   cur_un_pts_ = undistortedPts(cur_pts_, m_camera_[0]);
   pts_velocity_ =
       ptsVelocity(ids_, cur_un_pts_, cur_un_pts_map_, prev_un_pts_map_);
-
+  std::cout << "undistort pts + velcalc costs: " << t_und.toc() << " ms"
+            << std::endl;
   if (!_img1.empty() && stereo_cam_) {
     ids_right_.clear();
     cur_right_pts_.clear();
@@ -423,6 +428,7 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
                     status[i] = 0;
                 }
             }
+            
         }
         else {
              // If no flow_back, just download the forward results
@@ -447,7 +453,7 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
         reduceVector(cur_pts_, status);
         reduceVector(ids_, status);
         reduceVector(track_cnt_, status);
-        ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
+        ROS_INFO("temporal optical flow costs: %fms", t_o.toc());
     }
 
     for (auto &n : track_cnt_) n++;
@@ -489,7 +495,7 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
                 }
             }
         }
-        ROS_DEBUG("detect feature costs: %f ms", t_t.toc());
+        ROS_INFO("detect feature costs: %f ms", t_t.toc());
     }
 
     cur_un_pts_ = undistortedPts(cur_pts_, m_camera_[0]);
