@@ -132,6 +132,16 @@ RUN git clone --depth 1 --branch 2.2.0 https://ceres-solver.googlesource.com/cer
       -DBUILD_EXAMPLES=OFF && \
     make -j"$(nproc)" && make install
 
+RUN git clone --recursive https://github.com/PoseLib/PoseLib.git && \
+    cd PoseLib && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/usr/local .. && \
+    make -j4 && \
+    make install && \
+    cd ../.. && \
+    rm -rf PoseLib
+
 # Prep an empty catkin workspace (you’ll mount your sources later)
 RUN mkdir -p /root/catkin_ws/src
 WORKDIR /root/catkin_ws

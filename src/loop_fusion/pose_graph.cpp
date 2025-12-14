@@ -82,7 +82,7 @@ void PoseGraph::setIMUFlag(bool _use_imu) {
 }
 
 void PoseGraph::loadVocabulary(std::string voc_path) {
-  voc = new BriefVocabulary(voc_path);
+  voc = new BriefVocabulary(voc_path); 
   db.setVocabulary(*voc, false, 0);
 }
 
@@ -357,7 +357,7 @@ int PoseGraph::detectLoop(KeyFrame *keyframe, int frame_index) {
   keyframe->weak_index = match_index;
   std::cout << "Highest score: " << score << " from frame " << match_index << std::endl;
   if (match_index != -1 && score > params.netvlad_threshold) { // Tune this threshold
-      std::cout << "NetVLAD Loop detected! @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" << std::endl;
+      
       std::cout << "Loop detection time: " << tmp_t.toc() << " ms" << std::endl;
       std::cout << "Loop detection score: " << score << std::endl;
       std::cout << "Loop detected: Current Frame " << frame_index << " matched with Frame " << match_index << " with score " << score << std::endl;

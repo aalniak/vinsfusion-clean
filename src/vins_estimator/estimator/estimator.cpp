@@ -371,13 +371,12 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         
         pubDepthTrackImage(depth_8u, t);
         // [OPTIMIZATION E]: Single Channel Blending (No Merge/Split/CvtColor)
-        // Weighted sum: 70% Original Gray + 30% Depth Map
-        //cv::addWeighted(_img, 0.85, depth_8u, 0.15, 0, img_for_tracker);
+        // Weighted sum: 85% Original Gray + 15% Depth Map
+        cv::addWeighted(_img, 0.85, depth_8u, 0.15, 0, img_for_tracker);
 
         double time_proc = t_proc.toc();
 
-        // --- PRINT DEBUG STATS ---
-        // Only print if it's taking significant time (> 3ms)
+        
         
         printf("[Depth] Infer: %.2f ms | Post-Proc: %.2f ms | Total Add: %.2f ms\n", 
                 time_infer, time_proc, time_infer + time_proc);
@@ -406,7 +405,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
 
   if (_img1.empty())
     if (params.use_cuda_in_tracking)
-      featureFrame = featureTracker.trackImageCUDA(t, _img, depth_8u);
+      featureFrame = featureTracker.trackImageCUDA(t, img_for_tracker);
     else
       featureFrame = featureTracker.trackImage(t, img_for_tracker);
   else

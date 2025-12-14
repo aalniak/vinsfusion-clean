@@ -64,6 +64,8 @@ find_library(NVINFER_LIB nvinfer HINTS ${CUDA_SEARCH_PATHS})
 find_library(CUBLAS_LIB cublas HINTS ${CUDA_SEARCH_PATHS})
 find_library(CUDART_LIB cudart HINTS ${CUDA_SEARCH_PATHS})
 
+find_package(PoseLib REQUIRED)
+
 ## Find required packages
 find_package(catkin REQUIRED COMPONENTS
   roscpp
@@ -105,6 +107,7 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${CUDA_INCLUDE_DIRS}
   /usr/local/cuda/include
+  ${PoseLib_INCLUDE_DIRS}
 )
 
 ## Map Ceres and Eigen3 variables for catkin_package
@@ -182,6 +185,7 @@ target_link_libraries(vins_node
   ${CUDA_LIBRARIES}
   nvinfer
   cudart
+  PoseLib::PoseLib
 )
 
 add_executable(

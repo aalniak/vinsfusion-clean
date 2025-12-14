@@ -37,7 +37,7 @@ struct Parameters {
   double min_parallax;
   double acc_n, acc_w;
   double gyr_n, gyr_w;
-
+  std::string depth_engine_path;
   std::vector<Eigen::Matrix3d> ric;
   std::vector<Eigen::Vector3d> tic;
 
