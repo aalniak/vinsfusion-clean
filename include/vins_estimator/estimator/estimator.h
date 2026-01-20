@@ -30,6 +30,7 @@
 #include <vins_estimator/utility/tic_toc.h>
 #include <vins_estimator/utility/utility.h>
 #include "vins_estimator/estimator/DepthInfer.h"
+#include "vins_estimator/estimator/SplgInference.h"
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 #include <mutex>
@@ -85,20 +86,24 @@ class Estimator {
                            Vector3d &tici, Matrix3d &Rj, Vector3d &Pj,
                            Matrix3d &ricj, Vector3d &ticj, double depth,
                            Vector3d &uvi, Vector3d &uvj);
+  void smartDepthInitialization();
   void updateLatestStates();
   void fastPredictIMU(double t, const Eigen::Vector3d &linear_acceleration,
                       const Eigen::Vector3d &angular_velocity);
   bool IMUAvailable(double t);
   void initFirstIMUPose(vector<pair<double, Eigen::Vector3d>> &accVector);
-
+  double checkGeometricConsistency(const FeaturePerId &it_per_id, double proposed_metric_depth);
   enum SolverFlag { INITIAL, NON_LINEAR };
 
   enum MarginalizationFlag { MARGIN_OLD = 0, MARGIN_SECOND_NEW = 1 };
   std::shared_ptr<DepthInfer> depthInferer;
   std::map<double, cv::Mat> image_cache;
+  std::map<double, int> frame_index_cache;  // Maps timestamp to absolute frame index
   std::mutex mCache;
   Parameters &params;
-
+  double cached_scale = 1.0;
+  double cached_shift = 0.0;
+  bool scale_is_initialized = false;
   std::mutex mProcess;
   std::mutex mBuf;
   std::mutex mPropagate;
@@ -111,7 +116,7 @@ class Estimator {
   double prevTime = 0.0;
   double curTime = 0.0;
   bool openExEstimation = false;
-
+  int nonlinear_input_cnt = 0;
   std::thread trackThread;
   std::thread processThread;
 

@@ -40,7 +40,7 @@ private:
     float* d_scores;           // GPU Buffer for search results
     float* h_scores;           // CPU Buffer to read back results
 
-    // Config
+    // Config specific to netvlad export... Might need to export another onnx & engine for different sizes
     const int INPUT_W = 320;
     const int INPUT_H = 200;
     const int DESC_DIM = 4096; // 512 * 64

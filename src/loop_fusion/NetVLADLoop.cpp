@@ -1,6 +1,7 @@
 #include "loop_fusion/NetVLADLoop.h"
 #include <fstream>
 #include <algorithm>
+#include "vins_estimator/estimator/TrtCommon.h"
 
 NetVLADLoop::NetVLADLoop(const std::string& engine_path, int max_db_size) 
     : MAX_DB_SIZE(max_db_size) 
@@ -18,10 +19,10 @@ NetVLADLoop::NetVLADLoop(const std::string& engine_path, int max_db_size)
     file.read(trtModelStream, size);
     file.close();
 
-    runtime = nvinfer1::createInferRuntime(gLogger);
+    nvinfer1::IRuntime* runtime = TrtManager::getRuntime();
     engine = runtime->deserializeCudaEngine(trtModelStream, size);
     context = engine->createExecutionContext();
-    delete[] trtModelStream;
+    delete[] trtModelStream; //free this up, no longer needed
 
     // 2. Initialize cuBLAS
     cublasCreate(&cublas_handle);
@@ -77,8 +78,7 @@ std::vector<float> NetVLADLoop::extract_and_add(const cv::Mat& img, int frame_in
 
     // --- 3. ADD TO GPU DB ---
     if (current_db_size < MAX_DB_SIZE) {
-        // Copy the new descriptor from TRT output buffer -> Main Database Buffer
-        // Offset = current_db_size * DESC_DIM
+        // simply offset and copy
         float* db_ptr = d_database + (size_t)current_db_size * DESC_DIM;
         cudaMemcpy(db_ptr, buffers[1], DESC_DIM * sizeof(float), cudaMemcpyDeviceToDevice);
         

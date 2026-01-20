@@ -17,6 +17,8 @@
         <param name="config_path" value="$(arg config_path)" />
     </node>
 
-    <node name="rosbag_play" pkg="rosbag" type="play" output="screen" args="$(arg bag_path)"
-    required="$(arg nowait)" />
+    <node name="rosbag_play" pkg="rosbag" type="play" output="screen"
+      launch-prefix="bash -c 'sleep 5; exec &quot;$0&quot; &quot;$@&quot;'"
+      args="$(arg bag_path)"
+      required="$(arg nowait)" />
 </launch>

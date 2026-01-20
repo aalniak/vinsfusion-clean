@@ -21,6 +21,8 @@ catkin config \
     --extend /opt/ros/noetic \
     --cmake-args \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+    -DCATKIN_ENABLE_TESTING=0 \
+    -DCMAKE_PREFIX_PATH="/opt/ros/noetic" \
     -DCMAKE_BUILD_TYPE=Release
 ```
 

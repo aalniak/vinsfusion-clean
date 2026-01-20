@@ -1,20 +1,54 @@
 %YAML:1.0
+# tapnext related
+tapnext_enable: 1
+tapnext_onnx_path: "/datasets/tapnext_128.onnx"
+tapnext_engine_path: "/datasets/tapnext_128.engine"
+tapnext_max_track: 128
+tapnext_reset_boundary_ratio_x: 0.3
+tapnext_reset_boundary_ratio_y: 1.0
+tapnext_reset_min_percent: 0.1
+tapnext_reset_min_count: 10
+tapnext_reset_max_frames: 25
 
+# loss parameters for optimization
+loss_type: 1
+loss_parameter: 5.0
+loss_type_initial: 0
+loss_parameter_initial: 1.0
+
+# netvlad?
+netvlad_engine_path: "/datasets/netvlad_final_32.engine"                                                                                                                                   
+netvlad: 1                                                                                                                                                                               
+netvlad_threshold: 0.5                                                                                                                                                                     
+                                                                                                                                                                                           
+depth_engine_path: "/datasets/depth_anything_ac_16.engine"
 #common parameters
 #support: 1 imu 1 cam; 1 imu 2 cam: 2 cam; 
+
+use_depth: 0
+min_features: 35
+rgd: 1
+use_cuda_in_optimization: 0
+use_cuda_in_tracking: 0
+
+
 imu: 1         
-num_of_cam: 2  
+num_of_cam: 1  
 
-imu_topic: "/imu0"
-image0_topic: "/cam0/image_raw"
-image1_topic: "/cam1/image_raw"
-output_path: "~/output/"
+imu_topic: "/zed/zed_node/imu/data"
+image0_topic: "/zed/zed_node/left/color/rect/image"
+image1_topic: "/zed/zed_node/right/color/rect/image"
+output_path: "/data/zed_output/"
 
-cam0_calib: "cam0_mei.yaml"
-cam1_calib: "cam1_mei.yaml"
-image_width: 752
-image_height: 480
-   
+cam0_calib: "left.yaml"
+cam1_calib: "right.yaml"
+image_width: 640
+image_height: 360
+
+fx: 1058.17447808064
+fy: 1058.44701136475
+cx: 675.570437960496
+cy: 334.660609848669
 
 # Extrinsic parameter between IMU and Camera.
 estimate_extrinsic: 0   # 0  Have an accurate extrinsic parameters. We will trust the following imu^R_cam, imu^T_cam, don't change it.
@@ -24,26 +58,17 @@ body_T_cam0: !!opencv-matrix
    rows: 4
    cols: 4
    dt: d
-   data: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
-           0.999557249008, 0.0149672133247, 0.025715529948,  -0.064676986768,
-           -0.0257744366974, 0.00375618835797, 0.999660727178, 0.00981073058949,
-           0, 0, 0, 1]
-
-body_T_cam1: !!opencv-matrix
-   rows: 4
-   cols: 4
-   dt: d
-   data: [0.0125552670891, -0.999755099723, 0.0182237714554, -0.0198435579556,
-           0.999598781151, 0.0130119051815, 0.0251588363115, 0.0453689425024,
-          -0.0253898008918, 0.0179005838253, 0.999517347078, 0.00786212447038,
-          0, 0, 0, 1]
+   data: [-4.24811718e-03,  1.06355930e-03,  9.99990411e-01, -3.45219088e-06,
+          -9.99862513e-01,  1.60239856e-02, -4.26461647e-03,  8.42272147e-05,
+          -1.60283676e-02, -9.99871042e-01,  9.95341301e-04, -3.62660654e-07,
+          0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]
 
 #Multiple thread support
 multiple_thread: 1
 
 #feature traker paprameters
-max_cnt: 150            # max feature number in feature tracking
-min_dist: 30            # min distance between two features 
+max_cnt: 256            # max feature number in feature tracking
+min_dist: 25            # min distance between two features 
 freq: 10                # frequence (Hz) of publish tracking result. At least 10Hz for good estimation. If set 0, the frequence will be same as raw image 
 F_threshold: 1.0        # ransac threshold (pixel)
 show_track: 1           # publish tracking image as topic
@@ -69,13 +94,3 @@ td: 0.0                             # initial value of time offset. unit: s. rea
 load_previous_pose_graph: 0        # load and reuse previous pose graph; load from 'pose_graph_save_path'
 pose_graph_save_path: "~/output/pose_graph/" # save and load path
 save_image: 1                   # save image in pose graph for visualization prupose; you can close this function by setting 0 
-
-tapnext_enable: 1
-tapnext_onnx_path: "/datasets/tapnext_512.onnx"
-tapnext_engine_path: "/datasets/tapnext_512.engine"
-tapnext_max_track: 512
-tapnext_reset_boundary_ratio_x: 0.3
-tapnext_reset_boundary_ratio_y: 1.0
-tapnext_reset_min_percent: 0.1
-tapnext_reset_min_count: 10
-tapnext_reset_max_frames: 25

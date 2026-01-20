@@ -10,11 +10,11 @@
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
-#include <vins_estimator/featureTracker/feature_tracker.h>
+#include <vins_estimator/featureTracker/feature_tracker_klt.h>
 #include <cuda_runtime.h>
 namespace vins::estimator {
 bool ready = false;
-bool FeatureTracker::inBorder(const cv::Point2f &pt) const {
+bool FeatureTrackerKLT::inBorder(const cv::Point2f &pt) const {
   const int BORDER_SIZE = 1;
   int img_x = cvRound(pt.x);
   int img_y = cvRound(pt.y);
@@ -43,8 +43,8 @@ void reduceVector(vector<int> &v, vector<uchar> status) {
   v.resize(j);
 }
 
-FeatureTracker::FeatureTracker(Parameters &params)
-    : params(params), stereo_cam_(false), n_id_(0), has_prediction_(false)
+FeatureTrackerKLT::FeatureTrackerKLT(Parameters &params)
+    : params(params), stereo_cam_(false), has_prediction_(false)
 {
     if (params.use_cuda_in_tracking){
     gpu_lk_tracker = cv::cuda::SparsePyrLKOpticalFlow::create(
@@ -64,7 +64,7 @@ FeatureTracker::FeatureTracker(Parameters &params)
     }
 }
 
-void FeatureTracker::setMask() {
+void FeatureTrackerKLT::setMask() {
   mask_ = cv::Mat(row, col, CV_8UC1, cv::Scalar(255));
 
   // prefer to keep features that are tracked for long time
@@ -93,7 +93,7 @@ void FeatureTracker::setMask() {
   }
 }
 
-double FeatureTracker::distance(const cv::Point2f &pt1,
+double FeatureTrackerKLT::distance(const cv::Point2f &pt1,
                                 const cv::Point2f &pt2) {
   // printf("pt1: %f %f pt2: %f %f\n", pt1.x, pt1.y, pt2.x, pt2.y);
   double dx = pt1.x - pt2.x;
@@ -131,7 +131,7 @@ cv::Mat createDualChannelInput(const cv::Mat& gray, const cv::Mat& depth) {
 
 
 map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
-FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
+FeatureTrackerKLT::trackImage(double _cur_time, const cv::Mat &_img,
                            const cv::Mat &_img1) {
   TicToc t_r;
   cur_time_ = _cur_time;
@@ -157,7 +157,7 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
       cur_pts_ = predict_pts_;
       cv::calcOpticalFlowPyrLK(
           prev_img_, cur_img_, prev_pts_, cur_pts_, status, err,
-          cv::Size(21, 21), 1,
+          cv::Size(21, 21), 3,
           cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30,
                            0.01),
           cv::OPTFLOW_USE_INITIAL_FLOW);
@@ -230,7 +230,7 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
                               params.min_dist, mask_);
       for (auto &p : n_pts) {
         cur_pts_.push_back(p);
-        ids_.push_back(n_id_++);
+        ids_.push_back(IdCounter::get());
         track_cnt_.push_back(1);
       }
     }
@@ -346,7 +346,7 @@ FeatureTracker::trackImage(double _cur_time, const cv::Mat &_img,
 }
 
 map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
-FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
+FeatureTrackerKLT::trackImageCUDA(double _cur_time, const cv::Mat &_img,
                            const cv::Mat &_img1) {
     TicToc t_r;
     cur_time_ = _cur_time;
@@ -490,7 +490,7 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
                 for (auto &p : n_pts) {
                     if (cur_pts_.size() >= params.max_cnt) break; // formatting safety
                     cur_pts_.push_back(p);
-                    ids_.push_back(n_id_++);
+                    ids_.push_back(IdCounter::get());
                     track_cnt_.push_back(1);
                 }
             }
@@ -636,7 +636,7 @@ FeatureTracker::trackImageCUDA(double _cur_time, const cv::Mat &_img,
 }
 
 map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
-FeatureTracker::trackImageVecCUDA(double _cur_time, const cv::Mat &_img, const cv::Mat &depth,
+FeatureTrackerKLT::trackImageVecCUDA(double _cur_time, const cv::Mat &_img, const cv::Mat &depth,
                            const cv::Mat &_img1) {
     TicToc t_r;
     cur_time_ = _cur_time;
@@ -782,7 +782,7 @@ FeatureTracker::trackImageVecCUDA(double _cur_time, const cv::Mat &_img, const c
                 for (auto &p : n_pts) {
                     if (cur_pts_.size() >= params.max_cnt) break; // formatting safety
                     cur_pts_.push_back(p);
-                    ids_.push_back(n_id_++);
+                    ids_.push_back(IdCounter::get());
                     track_cnt_.push_back(1);
                 }
             }
@@ -928,7 +928,7 @@ FeatureTracker::trackImageVecCUDA(double _cur_time, const cv::Mat &_img, const c
 }
 
 
-void FeatureTracker::rejectWithF() {
+void FeatureTrackerKLT::rejectWithF() {
   if (cur_pts_.size() >= 8) {
     ROS_DEBUG("FM ransac begins");
     TicToc t_f;
@@ -965,7 +965,7 @@ void FeatureTracker::rejectWithF() {
   }
 }
 
-void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file) {
+void FeatureTrackerKLT::readIntrinsicParameter(const vector<string> &calib_file) {
   for (size_t i = 0; i < calib_file.size(); i++) {
     ROS_INFO("reading paramerter of camera %s", calib_file[i].c_str());
     camodocal::CameraPtr camera =
@@ -975,7 +975,7 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file) {
   if (calib_file.size() == 2) stereo_cam_ = true;
 }
 
-void FeatureTracker::showUndistortion(const string & /*name*/) {
+void FeatureTrackerKLT::showUndistortion(const string & /*name*/) {
   cv::Mat undistortedImg(row + 600, col + 600, CV_8UC1, cv::Scalar(0));
   vector<Eigen::Vector2d> distortedp;
   vector<Eigen::Vector2d> undistortedp;
@@ -1013,7 +1013,7 @@ void FeatureTracker::showUndistortion(const string & /*name*/) {
   // cv::waitKey(0);
 }
 
-vector<cv::Point2f> FeatureTracker::undistortedPts(
+vector<cv::Point2f> FeatureTrackerKLT::undistortedPts(
     vector<cv::Point2f> &pts, const camodocal::CameraPtr &cam) {
   vector<cv::Point2f> un_pts;
   for (auto &pt : pts) {
@@ -1025,7 +1025,7 @@ vector<cv::Point2f> FeatureTracker::undistortedPts(
   return un_pts;
 }
 
-vector<cv::Point2f> FeatureTracker::ptsVelocity(
+vector<cv::Point2f> FeatureTrackerKLT::ptsVelocity(
     vector<int> &ids, vector<cv::Point2f> &pts,
     map<int, cv::Point2f> &cur_id_pts, map<int, cv::Point2f> &prev_id_pts) {
   vector<cv::Point2f> pts_velocity;
@@ -1056,7 +1056,7 @@ vector<cv::Point2f> FeatureTracker::ptsVelocity(
   return pts_velocity;
 }
 
-void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
+void FeatureTrackerKLT::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
                                vector<int> &curLeftIds,
                                vector<cv::Point2f> &curLeftPts,
                                vector<cv::Point2f> &curRightPts,
@@ -1107,12 +1107,12 @@ void FeatureTracker::drawTrack(const cv::Mat &imLeft, const cv::Mat &imRight,
   // cv::Mat imCur2Compress;
   // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
 }
-void FeatureTracker::updateDepth(const cv::Mat &depthImg) {
+void FeatureTrackerKLT::updateDepth(const cv::Mat &depthImg) {
   depth_img_ = depthImg;
   ready = true;
 }
 
-void FeatureTracker::drawDepthTrack(const cv::Mat &imLeft,
+void FeatureTrackerKLT::drawDepthTrack(const cv::Mat &imLeft,
                                vector<int> &curLeftIds,
                                vector<cv::Point2f> &curLeftPts,
                                vector<cv::Point2f> &curRightPts,
@@ -1153,7 +1153,7 @@ void FeatureTracker::drawDepthTrack(const cv::Mat &imLeft,
   // cv::resize(imCur2, imCur2Compress, cv::Size(cols, rows / 2));
 }
 
-void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts) {
+void FeatureTrackerKLT::setPrediction(map<int, Eigen::Vector3d> &predictPts) {
   has_prediction_ = true;
   predict_pts_.clear();
   predict_pts_debug_.clear();
@@ -1173,7 +1173,7 @@ void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts) {
   }
 }
 
-void FeatureTracker::removeOutliers(set<int> &removePtsIds) {
+void FeatureTrackerKLT::removeOutliers(set<int> &removePtsIds) {
   std::set<int>::iterator itSet;
   vector<uchar> status;
   for (size_t i = 0; i < ids_.size(); i++) {
@@ -1189,6 +1189,6 @@ void FeatureTracker::removeOutliers(set<int> &removePtsIds) {
   reduceVector(track_cnt_, status);
 }
 
-cv::Mat FeatureTracker::getTrackImage() { return im_track_; }
-cv::Mat FeatureTracker::getDepthTrackImage() { return d_track; }
+cv::Mat FeatureTrackerKLT::getTrackImage() { return im_track_; }
+cv::Mat FeatureTrackerKLT::getDepthTrackImage() { return d_track; }
 }  // namespace vins::estimator

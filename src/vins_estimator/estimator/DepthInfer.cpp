@@ -1,6 +1,7 @@
 #include "vins_estimator/estimator/DepthInfer.h"
 #include <fstream>
 #include <iostream>
+#include "vins_estimator/estimator/TrtCommon.h"
 
 class Logger : public nvinfer1::ILogger {
     void log(Severity severity, const char* msg) noexcept override {
@@ -27,7 +28,7 @@ DepthInfer::DepthInfer(std::string engine_path) {
     file.close();
 
     // 2. Create Runtime
-    runtime = nvinfer1::createInferRuntime(gLogger);
+    nvinfer1::IRuntime* runtime = TrtManager::getRuntime();
     if (!runtime) std::cerr << "Failed to create TRT Runtime!" << std::endl;
 
     engine = runtime->deserializeCudaEngine(trtModelStream, size);

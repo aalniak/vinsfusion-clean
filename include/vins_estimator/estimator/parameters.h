@@ -75,14 +75,15 @@ struct Parameters {
   int load_previous_pose_graph;
 
   double terminate_t;
-
+  std::string depth_folder;
   int feature_debug;
   std::string feature_debug_path;
   bool use_depth;
-  
+  int use_gt;
   int use_cuda_in_optimization;
   int use_cuda_in_tracking;
   int rgd;
+  int metric_depth_vis = 1;  // 0: inverse depth visualization, 1: metric depth (log-scaled)
   float fx, fy, cx, cy;
   LossType loss_type;
   double loss_parameter;
@@ -91,9 +92,24 @@ struct Parameters {
 
   bool tracking_outlier_rejection;
   bool tracking_prediction;
+  
+  std::string tapnext_onnx_path;
+  std::string tapnext_engine_path;
+  bool tapnext_enable;
+  int tapnext_max_track;
+  float tapnext_reset_boundary_ratio_x;
+  float tapnext_reset_boundary_ratio_y;
+  float tapnext_reset_min_percent;
+  int tapnext_reset_min_count;
+  int tapnext_reset_max_frames;
 
   bool stereo_init;
   int stereo_init_lag;
+  
+  // Pre-optimization outlier filtering
+  int preopt_outlier_filter;           // Enable/disable pre-optimization outlier rejection
+  double preopt_edge_threshold;         // Skip features near image edge (normalized coords, e.g. 0.85)
+  double preopt_reproj_error_threshold; // Skip features with reproj error above this (normalized coords)
 
   void read_from_file(const std::string &config_file);
 };

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.17)
 project(vins)
 
 ## Set build type
@@ -10,59 +10,30 @@ cmake_policy(SET CMP0069 NEW)
 cmake_policy(SET CMP0074 NEW)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 
-# check for cuda flag USE_CUDA
-if (NOT DEFINED USE_CUDA)
-  set(USE_CUDA OFF)
-endif()
+# Enable CUDA
+find_package(CUDAToolkit REQUIRED COMPONENTS cublas cublasLt cudart cusolver cusparse)
 
-if (USE_CUDA)
-  if(CMAKE_VERSION VERSION_LESS 3.17)
-    find_package(CUDA REQUIRED)
-
-    add_library(CUDA::cudart   INTERFACE IMPORTED)
-    add_library(CUDA::cublas   INTERFACE IMPORTED)
-    add_library(CUDA::cublasLt INTERFACE IMPORTED)
-    add_library(CUDA::cusolver INTERFACE IMPORTED)
-    add_library(CUDA::cusparse INTERFACE IMPORTED)
-
-    # Use legacy vars; fall back to find_library if any are empty
-    if(NOT CUDA_CUDART_LIBRARY)
-      find_library(CUDA_CUDART_LIBRARY cudart HINTS "${CUDA_TOOLKIT_ROOT_DIR}/lib64" "/usr/local/cuda/lib64")
-    endif()
-    if(NOT CUDA_CUBLAS_LIBRARIES)
-      find_library(CUDA_CUBLAS_LIBRARIES cublas HINTS "${CUDA_TOOLKIT_ROOT_DIR}/lib64" "/usr/local/cuda/lib64")
-    endif()
-    if(NOT CUDA_CUBLASLT_LIBRARY)
-      find_library(CUDA_CUBLASLT_LIBRARY cublasLt HINTS "${CUDA_TOOLKIT_ROOT_DIR}/lib64" "/usr/local/cuda/lib64")
-    endif()
-    if(NOT CUDA_cusolver_LIBRARY)
-      find_library(CUDA_cusolver_LIBRARY cusolver HINTS "${CUDA_TOOLKIT_ROOT_DIR}/lib64" "/usr/local/cuda/lib64")
-    endif()
-    if(NOT CUDA_cusparse_LIBRARY)
-      find_library(CUDA_cusparse_LIBRARY cusparse HINTS "${CUDA_TOOLKIT_ROOT_DIR}/lib64" "/usr/local/cuda/lib64")
-    endif()
-
-    set_target_properties(CUDA::cudart   PROPERTIES INTERFACE_LINK_LIBRARIES "${CUDA_CUDART_LIBRARY}")
-    set_target_properties(CUDA::cublas   PROPERTIES INTERFACE_LINK_LIBRARIES "${CUDA_CUBLAS_LIBRARIES}")
-    set_target_properties(CUDA::cublasLt PROPERTIES INTERFACE_LINK_LIBRARIES "${CUDA_CUBLASLT_LIBRARY}")
-    set_target_properties(CUDA::cusolver PROPERTIES INTERFACE_LINK_LIBRARIES "${CUDA_cusolver_LIBRARY}")
-    set_target_properties(CUDA::cusparse PROPERTIES INTERFACE_LINK_LIBRARIES "${CUDA_cusparse_LIBRARY}")
-  else()
-    find_package(CUDAToolkit REQUIRED COMPONENTS cublas cublasLt cudart cusolver cusparse)
-  endif()
-endif()
+# Find TensorRT
+set(TENSORRT_ROOT "/usr")
 
 set(CUDA_SEARCH_PATHS 
     "/usr/local/cuda/lib64" 
     "/usr/local/cuda/lib"
     "/usr/lib/aarch64-linux-gnu"
+    ${CUDAToolkit_LIBRARY_DIRS}
+    ${TENSORRT_ROOT}/lib
+    ${TENSORRT_ROOT}/lib64
 )
 
-find_package(CUDA REQUIRED)
-find_library(TENSORRT_LIB nvinfer)
-find_library(NVINFER_LIB nvinfer HINTS ${CUDA_SEARCH_PATHS})
-find_library(CUBLAS_LIB cublas HINTS ${CUDA_SEARCH_PATHS})
-find_library(CUDART_LIB cudart HINTS ${CUDA_SEARCH_PATHS})
+# Locate TensorRT include files and libraries
+find_path(TENSORRT_INCLUDE_DIR NvInfer.h HINTS ${CUDA_SEARCH_PATHS})
+find_library(TENSORRT_LIB nvinfer HINTS ${CUDA_SEARCH_PATHS})
+find_library(TENSORRT_PARSER_LIB nvonnxparser HINTS ${CUDA_SEARCH_PATHS})
+
+# Check if TensorRT was found
+if (NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_LIB OR NOT TENSORRT_PARSER_LIB)
+    message(FATAL_ERROR "Could not find TensorRT (headers/libs). Set TENSORRT_ROOT.")
+endif()
 
 find_package(PoseLib REQUIRED)
 
@@ -105,9 +76,9 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
   ${CERES_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
-  ${CUDA_INCLUDE_DIRS}
-  /usr/local/cuda/include
   ${PoseLib_INCLUDE_DIRS}
+  ${TENSORRT_INCLUDE_DIR}
+  ${CUDAToolkit_INCLUDE_DIRS}
 )
 
 ## Map Ceres and Eigen3 variables for catkin_package
@@ -151,9 +122,11 @@ add_executable(
   vins_node
   src/node/node_ros.cpp
   src/vins_estimator/estimator/DepthInfer.cpp
+  #src/vins_estimator/estimator/AsyncPoseSolver.cpp
   src/vins_estimator/estimator/parameters.cpp
   src/vins_estimator/estimator/estimator.cpp
   src/vins_estimator/estimator/feature_manager.cpp
+  src/vins_estimator/estimator/SplgInference.cpp
   src/vins_estimator/factor/pose_local_parameterization.cpp
   src/vins_estimator/factor/projectionTwoFrameOneCamFactor.cpp
   src/vins_estimator/factor/projectionTwoFrameTwoCamFactor.cpp
@@ -166,7 +139,10 @@ add_executable(
   src/vins_estimator/initial/initial_aligment.cpp
   src/vins_estimator/initial/initial_sfm.cpp
   src/vins_estimator/initial/initial_ex_rotation.cpp
-  src/vins_estimator/featureTracker/feature_tracker.cpp
+  src/vins_estimator/featureTracker/feature_tracker_klt.cpp
+  src/vins_estimator/featureTracker/feature_tracker_tapnext.cpp
+  src/vins_estimator/featureTracker/tapnext_trt.cpp
+  src/vins_estimator/featureTracker/anms.cpp
   src/camodocal/camera_models/Camera.cc
   src/camodocal/camera_models/CameraFactory.cc
   src/camodocal/camera_models/PinholeCamera.cc
@@ -182,10 +158,10 @@ target_link_libraries(vins_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
-  ${CUDA_LIBRARIES}
-  nvinfer
-  cudart
-  PoseLib::PoseLib
+  ${CUDAToolkit_LIBRARIES}
+  ${TENSORRT_LIB}
+  ${TENSORRT_PARSER_LIB}
+  ${PoseLib_LIBRARIES}
 )
 
 add_executable(
@@ -218,9 +194,10 @@ target_link_libraries(loop_fusion_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
-  ${NVINFER_LIB}  
-  ${CUBLAS_LIB}    
-  ${CUDART_LIB}    
+  ${CUDAToolkit_LIBRARIES}
+  ${TENSORRT_LIB}
+  ${TENSORRT_PARSER_LIB}
+  ${PoseLib_LIBRARIES}
 )
 
 add_executable(

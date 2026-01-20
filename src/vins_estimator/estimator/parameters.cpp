@@ -171,10 +171,14 @@ void Parameters::read_from_file(const std::string &config_file) {
   fsSettings["use_cuda_in_optimization"] >> use_cuda_in_optimization;
   fsSettings["use_cuda_in_tracking"] >> use_cuda_in_tracking;
   fsSettings["rgd"] >> rgd;
+  fsSettings["metric_depth_vis"] >> metric_depth_vis;
+  if (metric_depth_vis != 0 && metric_depth_vis != 1) metric_depth_vis = 1;  // Default to metric
   fsSettings["fx"] >> fx;
   fsSettings["fy"] >> fy;
   fsSettings["cx"] >> cx;
   fsSettings["cy"] >> cy;
+  fsSettings["depth_folder"] >> depth_folder;
+  fsSettings["use_gt"] >> use_gt;
   fsSettings["depth_engine_path"] >> depth_engine_path;
   save_image = fsSettings["save_image"];
   load_previous_pose_graph = fsSettings["load_previous_pose_graph"];
@@ -267,6 +271,113 @@ void Parameters::read_from_file(const std::string &config_file) {
   } else {
     fsSettings["stereo_init_lag"] >> stereo_init_lag;
   }
+
+  // Pre-optimization outlier filtering parameters
+  if (fsSettings["preopt_outlier_filter"].empty()) {
+    preopt_outlier_filter = 0;  // Default: disabled
+  } else {
+    fsSettings["preopt_outlier_filter"] >> preopt_outlier_filter;
+  }
+  
+  if (fsSettings["preopt_edge_threshold"].empty()) {
+    preopt_edge_threshold = 0.85;  // Default: skip features with |x|,|y| > 0.85
+  } else {
+    fsSettings["preopt_edge_threshold"] >> preopt_edge_threshold;
+  }
+  
+  if (fsSettings["preopt_reproj_error_threshold"].empty()) {
+    preopt_reproj_error_threshold = 1.0;  // Default: skip features with reproj error > 1.0
+  } else {
+    fsSettings["preopt_reproj_error_threshold"] >> preopt_reproj_error_threshold;
+  }
+  
+  if (preopt_outlier_filter) {
+    ROS_INFO("\033[1;32m[PRE-OPT] Outlier filter ENABLED: edge_thresh=%.2f, reproj_thresh=%.2f\033[0m",
+             preopt_edge_threshold, preopt_reproj_error_threshold);
+  } else {
+    ROS_INFO("\033[1;33m[PRE-OPT] Outlier filter DISABLED\033[0m");
+  }
+
+  if (fsSettings["tapnext_onnx_path"].empty()) {
+    std::cerr << "ERROR: tapnext_onnx_path not set in config file, "
+                 "defaulting to empty string"
+              << std::endl;
+    tapnext_onnx_path = "";
+  } else {
+    fsSettings["tapnext_onnx_path"] >> tapnext_onnx_path;
+  }
+
+  if (fsSettings["tapnext_engine_path"].empty()) {
+    std::cerr << "ERROR: tapnext_engine_path not set in config file, "
+                 "defaulting to empty string"
+              << std::endl;
+    tapnext_engine_path = "";
+  } else {
+    fsSettings["tapnext_engine_path"] >> tapnext_engine_path;
+  }
+
+  if (fsSettings["tapnext_enable"].empty()) {
+    std::cerr << "ERROR: tapnext_enable not set in config file, "
+                 "defaulting to false"
+              << std::endl;
+    tapnext_enable = false;
+  } else {
+    fsSettings["tapnext_enable"] >> tapnext_enable;
+  }
+
+  if (fsSettings["tapnext_max_track"].empty()) {
+    std::cerr << "ERROR: tapnext_max_track not set in config file, "
+                 "defaulting to 256"
+              << std::endl;
+    tapnext_max_track = 256;
+  } else {
+    fsSettings["tapnext_max_track"] >> tapnext_max_track;
+  }
+
+  if (fsSettings["tapnext_reset_boundary_ratio_x"].empty()) {
+    std::cerr << "ERROR: tapnext_reset_boundary_ratio_x not set in config file, "
+                 "defaulting to 0.3"
+              << std::endl;
+    tapnext_reset_boundary_ratio_x = 0.3F;
+  } else {
+    fsSettings["tapnext_reset_boundary_ratio_x"] >> tapnext_reset_boundary_ratio_x;
+  }
+  
+  if (fsSettings["tapnext_reset_boundary_ratio_y"].empty()) {
+    std::cerr << "ERROR: tapnext_reset_boundary_ratio_y not set in config file, "
+                 "defaulting to 1.0"
+              << std::endl;
+    tapnext_reset_boundary_ratio_y = 1.0F;
+  } else {
+    fsSettings["tapnext_reset_boundary_ratio_y"] >> tapnext_reset_boundary_ratio_y;
+  }
+
+  if (fsSettings["tapnext_reset_min_percent"].empty()) {
+    std::cerr << "ERROR: tapnext_reset_min_percent not set in config file, "
+                 "defaulting to 0.1"
+              << std::endl;
+    tapnext_reset_min_percent = 0.1F;
+  } else {
+    fsSettings["tapnext_reset_min_percent"] >> tapnext_reset_min_percent;
+  }
+
+  if (fsSettings["tapnext_reset_min_count"].empty()) {
+    std::cerr << "ERROR: tapnext_reset_min_count not set in config file, "
+                 "defaulting to 10"
+              << std::endl;
+    tapnext_reset_min_count = 10;
+  } else {
+    fsSettings["tapnext_reset_min_count"] >> tapnext_reset_min_count;
+  }
+
+    if (fsSettings["tapnext_reset_max_frames"].empty()) {
+        std::cerr << "ERROR: tapnext_reset_max_frames not set in config file, "
+                        "defaulting to 100"
+                << std::endl;
+        tapnext_reset_max_frames = 100;
+    } else {
+        fsSettings["tapnext_reset_max_frames"] >> tapnext_reset_max_frames;
+    }
 
   fsSettings.release();
 
