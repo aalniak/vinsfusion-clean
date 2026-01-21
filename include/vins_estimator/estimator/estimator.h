@@ -103,6 +103,8 @@ class Estimator {
   Parameters &params;
   double cached_scale = 1.0;
   double cached_shift = 0.0;
+  double cached_inv_depth_variance = 0.01;  // Variance of (vio_inv - aligned_inv) for Mahalanobis
+  double cached_inv_depth_mean_error = 0.0;  // Mean error for centering
   bool scale_is_initialized = false;
   std::mutex mProcess;
   std::mutex mBuf;

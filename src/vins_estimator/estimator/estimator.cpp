@@ -28,22 +28,30 @@ struct DepthPriorFactor
 {
     const double aligned_inv_depth;  // = global_scale * mono_inv_depth + global_shift
     const double sqrt_info;
+    const bool use_log;              // true: log-domain residual, false: linear residual
 
-    DepthPriorFactor(double aligned_inv_d, double weight)
-        : aligned_inv_depth(aligned_inv_d), sqrt_info(weight) {}
+    DepthPriorFactor(double aligned_inv_d, double weight, bool log_residual = false)
+        : aligned_inv_depth(aligned_inv_d), sqrt_info(weight), use_log(log_residual) {}
 
     template <typename T>
     bool operator()(const T* const inv_depth_vio, T* residuals) const
     {
-        // Simple residual: pull VIO inverse depth toward the pre-aligned depth
-        // The alignment (scale/shift) was computed externally via RANSAC
-        residuals[0] = T(sqrt_info) * (inv_depth_vio[0] - T(aligned_inv_depth));
+        if (use_log) {
+            // Log-domain residual: both depths are in inverse domain
+            // Converting to log space makes the residual scale-invariant and more robust
+            // log(inv_d_vio) - log(inv_d_prior) = log(inv_d_vio / inv_d_prior)
+            // This is equivalent to relative depth error in log space
+            residuals[0] = T(sqrt_info) * (ceres::log(inv_depth_vio[0]) - ceres::log(T(aligned_inv_depth)));
+        } else {
+            // Linear residual in inverse depth domain
+            residuals[0] = T(sqrt_info) * (inv_depth_vio[0] - T(aligned_inv_depth));
+        }
         return true;
     }
 
-    static ceres::CostFunction* Create(double aligned_inv_d, double weight) {
+    static ceres::CostFunction* Create(double aligned_inv_d, double weight, bool log_residual = false) {
         return new ceres::AutoDiffCostFunction<DepthPriorFactor, 1, 1>(
-            new DepthPriorFactor(aligned_inv_d, weight));
+            new DepthPriorFactor(aligned_inv_d, weight, log_residual));
     }
 };
 
@@ -960,6 +968,48 @@ void Estimator::smartDepthInitialization() {
             double alpha = 0.1; 
             cached_scale = (1.0 - alpha) * cached_scale + alpha * best_s;
             cached_shift = (1.0 - alpha) * cached_shift + alpha * best_t;
+        }
+        
+        // ------------------------------------------------------------------
+        // STEP 2.5: COMPUTE VARIANCE for Mahalanobis weighting (in inverse domain)
+        // ------------------------------------------------------------------
+        // Using INLIERS only to compute robust variance estimate
+        double sum_errors = 0.0;
+        double sum_errors_sq = 0.0;
+        int variance_n = 0;
+        
+        for (int i = 0; i < num_points; i++) {
+            double aligned_inv = best_s * v_mono_inv_depths[i] + best_t;
+            double error = v_vio_inv_depths[i] - aligned_inv;
+            double abs_error = std::abs(error);
+            
+            // Only use inliers for variance computation (same threshold as RANSAC)
+            if (abs_error < threshold) {
+                sum_errors += error;
+                sum_errors_sq += error * error;
+                variance_n++;
+            }
+        }
+        
+        if (variance_n > 5) {
+            double mean_error = sum_errors / variance_n;
+            double variance = (sum_errors_sq / variance_n) - (mean_error * mean_error);
+            
+            // Ensure minimum variance to avoid numerical issues
+            variance = std::max(variance, 1e-6);
+            
+            // Exponential smoothing for variance (slower update to be stable)
+            double var_alpha = 0.05;
+            if (!scale_is_initialized || cached_inv_depth_variance < 1e-8) {
+                cached_inv_depth_variance = variance;
+                cached_inv_depth_mean_error = mean_error;
+            } else {
+                cached_inv_depth_variance = (1.0 - var_alpha) * cached_inv_depth_variance + var_alpha * variance;
+                cached_inv_depth_mean_error = (1.0 - var_alpha) * cached_inv_depth_mean_error + var_alpha * mean_error;
+            }
+            
+            printf("\033[1;33m[Depth Mahalanobis] Inv-depth variance=%.6f, mean_err=%.6f, n=%d\033[0m\n",
+                   cached_inv_depth_variance, cached_inv_depth_mean_error, variance_n);
         }
     }
 
@@ -2533,12 +2583,42 @@ void Estimator::optimization() {
                 if (aligned_inv_depth > 0.01 && aligned_inv_depth < 10.0 &&  // Valid inv depth range
                     vins_metric_depth > 0.1 && vins_metric_depth < 100.0) {  // VIO depth reasonable
                   
-                  // Adaptive weight: lower for features with high uncertainty
-                  double base_weight = WEIGHT;
+                  double adaptive_weight = WEIGHT;
                   
-                  // Add the depth prior factor
+                  // ================================================================
+                  // MAHALANOBIS DISTANCE-BASED WEIGHTING (Inverse Domain)
+                  // Only enabled if use_mahalanobis_weight == 1 in config
+                  // ================================================================
+                  if (params.use_mahalanobis_weight) {
+                    // Compute the discrepancy between VIO and aligned depth in inverse domain
+                    double inv_depth_error = vins_inv_depth - aligned_inv_depth;
+                    
+                    // Mahalanobis distance: d_M = |error - mean| / sqrt(variance)
+                    // This measures how many standard deviations away this measurement is
+                    double std_dev = std::sqrt(cached_inv_depth_variance);
+                    double mahalanobis_dist = std::abs(inv_depth_error - cached_inv_depth_mean_error) / (std_dev + 1e-8);
+                    
+                    // Adaptive weight based on Mahalanobis distance
+                    // Features with large discrepancy (outliers) get lower weight
+                    // Using a soft thresholding function: w = base_weight * exp(-k * d_M^2)
+                    // This gives:
+                    //   - Full weight when d_M ≈ 0 (measurement agrees with model)
+                    //   - Exponentially decreasing weight for outliers
+                    //   - k controls how quickly weight drops (k=0.5 means ~60% weight at 1 std dev)
+                    double k_mahal = 0.5;  // Tuning parameter for weight falloff
+                    double mahal_weight_factor = std::exp(-k_mahal * mahalanobis_dist * mahalanobis_dist);
+                    
+                    // Clamp minimum weight to avoid completely ignoring any measurement
+                    mahal_weight_factor = std::max(mahal_weight_factor, 0.1);
+                    
+                    adaptive_weight = WEIGHT * mahal_weight_factor;
+                  }
+                  
+                  // Add the depth prior factor with (optionally Mahalanobis-weighted) information
+                  // Pass residual_log flag to control log vs linear residual
+                  bool use_log_residual = (params.residual_log == 1);
                   ceres::CostFunction* cost_function = 
-                      DepthPriorFactor::Create(aligned_inv_depth, base_weight);
+                      DepthPriorFactor::Create(aligned_inv_depth, adaptive_weight, use_log_residual);
                   ceres::ResidualBlockId block_id = problem.AddResidualBlock(cost_function,
                                           depth_align_loss_function,
                                           para_Feature[feature_index]);
@@ -2563,8 +2643,8 @@ void Estimator::optimization() {
   
   // Debug output
   if (added_depth_factors > 0) {
-    printf("\033[1;36m[Depth Opt] Added %d depth priors (s=%.3f, t=%.3f, w=%.2f)\033[0m\n", 
-           added_depth_factors, cached_scale, cached_shift, WEIGHT);
+    printf("\033[1;36m[Depth Opt] Added %d depth priors (s=%.3f, t=%.3f, w=%.2f, var=%.6f)\033[0m\n", 
+           added_depth_factors, cached_scale, cached_shift, WEIGHT, cached_inv_depth_variance);
   }
   added_depth_factors = 0; //Reset for next optimization call
   std::cout << "Feature count per frame: ";

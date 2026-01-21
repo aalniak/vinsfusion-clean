@@ -110,6 +110,10 @@ struct Parameters {
   int preopt_outlier_filter;           // Enable/disable pre-optimization outlier rejection
   double preopt_edge_threshold;         // Skip features near image edge (normalized coords, e.g. 0.85)
   double preopt_reproj_error_threshold; // Skip features with reproj error above this (normalized coords)
+  
+  // Depth factor weighting
+  int use_mahalanobis_weight;           // 0: constant weight, 1: Mahalanobis distance-based adaptive weight
+  int residual_log;                     // 0: linear residual (inv_d - inv_d_prior), 1: log residual (log(inv_d) - log(inv_d_prior))
 
   void read_from_file(const std::string &config_file);
 };

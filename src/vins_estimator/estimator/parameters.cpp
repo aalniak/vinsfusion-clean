@@ -298,6 +298,32 @@ void Parameters::read_from_file(const std::string &config_file) {
     ROS_INFO("\033[1;33m[PRE-OPT] Outlier filter DISABLED\033[0m");
   }
 
+  // Depth factor Mahalanobis weighting
+  if (fsSettings["use_mahalanobis_weight"].empty()) {
+    use_mahalanobis_weight = 0;  // Default: disabled (constant weight)
+  } else {
+    fsSettings["use_mahalanobis_weight"] >> use_mahalanobis_weight;
+  }
+  
+  if (use_mahalanobis_weight) {
+    ROS_INFO("\033[1;32m[DEPTH] Mahalanobis distance-based adaptive weighting ENABLED\033[0m");
+  } else {
+    ROS_INFO("\033[1;33m[DEPTH] Using constant depth factor weight\033[0m");
+  }
+
+  // Depth factor residual domain
+  if (fsSettings["residual_log"].empty()) {
+    residual_log = 0;  // Default: linear residual
+  } else {
+    fsSettings["residual_log"] >> residual_log;
+  }
+  
+  if (residual_log) {
+    ROS_INFO("\033[1;32m[DEPTH] Using LOG domain residual: log(inv_d_vio) - log(inv_d_prior)\033[0m");
+  } else {
+    ROS_INFO("\033[1;33m[DEPTH] Using LINEAR residual: inv_d_vio - inv_d_prior\033[0m");
+  }
+
   if (fsSettings["tapnext_onnx_path"].empty()) {
     std::cerr << "ERROR: tapnext_onnx_path not set in config file, "
                  "defaulting to empty string"
