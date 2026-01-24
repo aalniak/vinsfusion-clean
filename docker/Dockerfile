@@ -182,6 +182,6 @@ RUN apt-get update && \
 #    python3 -m pip install . --no-build-isolation && \
 #    cd .. && \
 #    rm -rf torch2trt
-
+RUN pip install evo
 WORKDIR /root/catkin_ws
 CMD ["/bin/bash"]

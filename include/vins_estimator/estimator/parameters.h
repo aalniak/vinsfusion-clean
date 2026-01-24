@@ -115,6 +115,17 @@ struct Parameters {
   int use_mahalanobis_weight;           // 0: constant weight, 1: Mahalanobis distance-based adaptive weight
   int residual_log;                     // 0: linear residual (inv_d - inv_d_prior), 1: log residual (log(inv_d) - log(inv_d_prior))
 
+  // Temporal stability filter for depth priors
+  int temporal_stable;                    // 0: disabled, 1: enabled - only trust temporally stable depth
+  int temporal_stable_buffer_size;        // Number of frames to track depth history (default: 5)
+  double temporal_stable_variance_thresh; // Max variance (in inv-depth) to trust depth (default: 0.01)
+
+  // Ordinal depth constraints (relative ordering)
+  int ordinal_depth;                      // 0: disabled, 1: enabled - enforce relative depth ordering
+  double ordinal_depth_margin;            // Min inv-depth difference to enforce ordering (default: 0.01)
+  double ordinal_depth_weight;            // Weight for ordinal constraint factors (default: 1.0)
+  int ordinal_depth_max_pairs;            // Max number of ordinal pairs per frame (default: 50)
+
   void read_from_file(const std::string &config_file);
 };
 

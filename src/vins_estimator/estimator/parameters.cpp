@@ -324,6 +324,64 @@ void Parameters::read_from_file(const std::string &config_file) {
     ROS_INFO("\033[1;33m[DEPTH] Using LINEAR residual: inv_d_vio - inv_d_prior\033[0m");
   }
 
+  // Temporal stability filter for depth priors
+  if (fsSettings["temporal_stable"].empty()) {
+    temporal_stable = 0;  // Default: disabled
+  } else {
+    fsSettings["temporal_stable"] >> temporal_stable;
+  }
+  
+  if (fsSettings["temporal_stable_buffer_size"].empty()) {
+    temporal_stable_buffer_size = 5;  // Default: 5 frames
+  } else {
+    fsSettings["temporal_stable_buffer_size"] >> temporal_stable_buffer_size;
+  }
+  
+  if (fsSettings["temporal_stable_variance_thresh"].empty()) {
+    temporal_stable_variance_thresh = 0.01;  // Default: 0.01 inv-depth variance
+  } else {
+    fsSettings["temporal_stable_variance_thresh"] >> temporal_stable_variance_thresh;
+  }
+  
+  if (temporal_stable) {
+    ROS_INFO("\033[1;32m[DEPTH] Temporal stability filter ENABLED: buffer=%d, var_thresh=%.4f\033[0m",
+             temporal_stable_buffer_size, temporal_stable_variance_thresh);
+  } else {
+    ROS_INFO("\033[1;33m[DEPTH] Temporal stability filter DISABLED\033[0m");
+  }
+
+  // Ordinal depth constraints
+  if (fsSettings["ordinal_depth"].empty()) {
+    ordinal_depth = 0;  // Default: disabled
+  } else {
+    fsSettings["ordinal_depth"] >> ordinal_depth;
+  }
+  
+  if (fsSettings["ordinal_depth_margin"].empty()) {
+    ordinal_depth_margin = 0.01;  // Default: 0.01 inv-depth margin
+  } else {
+    fsSettings["ordinal_depth_margin"] >> ordinal_depth_margin;
+  }
+  
+  if (fsSettings["ordinal_depth_weight"].empty()) {
+    ordinal_depth_weight = 1.0;  // Default: 1.0
+  } else {
+    fsSettings["ordinal_depth_weight"] >> ordinal_depth_weight;
+  }
+  
+  if (fsSettings["ordinal_depth_max_pairs"].empty()) {
+    ordinal_depth_max_pairs = 50;  // Default: 50 pairs per frame
+  } else {
+    fsSettings["ordinal_depth_max_pairs"] >> ordinal_depth_max_pairs;
+  }
+  
+  if (ordinal_depth) {
+    ROS_INFO("\033[1;32m[DEPTH] Ordinal depth constraints ENABLED: margin=%.4f, weight=%.2f, max_pairs=%d\033[0m",
+             ordinal_depth_margin, ordinal_depth_weight, ordinal_depth_max_pairs);
+  } else {
+    ROS_INFO("\033[1;33m[DEPTH] Ordinal depth constraints DISABLED\033[0m");
+  }
+
   if (fsSettings["tapnext_onnx_path"].empty()) {
     std::cerr << "ERROR: tapnext_onnx_path not set in config file, "
                  "defaulting to empty string"

@@ -76,6 +76,31 @@ class FeaturePerId {
   int used_num;
   double estimated_depth;
   int solve_flag;  // 0 haven't solve yet; 1 solve succ; 2 solve fail;
+  
+  // Temporal depth stability tracking (for filtering flickering zero-shot depth)
+  std::vector<double> depth_history;  // Circular buffer of aligned inverse depths
+  double depth_variance = 1.0;        // Variance of depth_history (default high = unstable)
+  bool depth_stable = false;          // True if variance < threshold
+  
+  void updateDepthHistory(double aligned_inv_depth, int buffer_size, double variance_thresh) {
+    depth_history.push_back(aligned_inv_depth);
+    if (static_cast<int>(depth_history.size()) > buffer_size) {
+      depth_history.erase(depth_history.begin());
+    }
+    // Compute variance if we have enough samples
+    if (depth_history.size() >= 3) {
+      double mean = 0.0;
+      for (double d : depth_history) mean += d;
+      mean /= depth_history.size();
+      double var = 0.0;
+      for (double d : depth_history) var += (d - mean) * (d - mean);
+      depth_variance = var / depth_history.size();
+      depth_stable = (depth_variance < variance_thresh);
+    } else {
+      depth_variance = 1.0;
+      depth_stable = false;
+    }
+  }
 };
 
 class FeatureManager {

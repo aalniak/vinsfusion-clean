@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <fstream>
 #include <algorithm>  // For std::sort, std::nth_element
+#include <vins_estimator/factor/ordinalDepthFactor.h>  // For OrdinalDepthFactor
 
 namespace vins::estimator {
 // ------- Depth factor declaration ------- 
@@ -1017,7 +1018,8 @@ void Estimator::smartDepthInitialization() {
     // STEP 3: RESCUE (Fix "The Students")
     // ------------------------------------------------------------------
     int rescued_count = 0;
-    
+
+    TicToc t_rescue;
     if (scale_is_initialized) {
         for (auto &it_per_id : f_manager.feature) {
             if (it_per_id.feature_per_frame.size() < 2) continue;
@@ -1095,6 +1097,7 @@ void Estimator::smartDepthInitialization() {
             }
         }
     }
+    if (scale_is_initialized) ROS_INFO("[Rescue] Time cost: %f ms", t_rescue.toc());
     
     if (rescued_count > 0 || (valid_count > 0 && frame_count % 15 == 0)) {
         
@@ -2372,6 +2375,7 @@ void Estimator::optimization() {
   }
   int skipped_outliers = 0;  // Count features skipped due to high initial error
   
+  double t_temporal_cost = 0.0;
   for (auto &it_per_id : f_manager.feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
     if (it_per_id.used_num < 4) continue;
@@ -2412,6 +2416,7 @@ void Estimator::optimization() {
       // Store individual errors for debugging
       std::vector<std::tuple<int, double, Vector3d, Vector3d>> per_obs_errors;  // (frame_j, error, pts_i, pts_j)
       
+    
       for (auto &it_per_frame : it_per_id.feature_per_frame) {
         imu_j_check++;
         if (imu_i_check != imu_j_check) {
@@ -2425,6 +2430,7 @@ void Estimator::optimization() {
           per_obs_errors.push_back({imu_j_check, err, pts_i_check, pts_j_check});
         }
       }
+      
       
       // Skip feature if average reprojection error is too high
       double avg_reproj_error = (error_cnt > 0) ? total_reproj_error / error_cnt : 0.0;
@@ -2519,6 +2525,7 @@ void Estimator::optimization() {
     // Key insight: Instead of optimizing scale/shift per-frame (too many unknowns),
     // we use the globally learned scale/shift from smartDepthInitialization()
     // and add a simple prior pulling VIO depths toward aligned mono depths.
+
     if (solver_flag == NON_LINEAR && params.use_depth && WEIGHT > 0.0 && scale_is_initialized) {
       int first_frame_idx = it_per_id.start_frame;
       
@@ -2576,6 +2583,19 @@ void Estimator::optimization() {
                 // Apply pre-computed global alignment
                 double aligned_inv_depth = cached_scale * mono_inv_depth + cached_shift;
                 
+                // ================================================================
+                // TEMPORAL STABILITY: Update depth history and check variance
+                // Only enabled if params.temporal_stable == 1
+                // ================================================================
+                if (params.temporal_stable) {
+                  TicToc t_temp;
+                  // Update the feature's depth history with this aligned measurement
+                  it_per_id.updateDepthHistory(aligned_inv_depth, 
+                                                params.temporal_stable_buffer_size,
+                                                params.temporal_stable_variance_thresh);
+                  t_temporal_cost += t_temp.toc();
+                }
+                
                 // Sanity checks
                 float vins_inv_depth = para_Feature[feature_index][0];
                 float vins_metric_depth = 1.0f / vins_inv_depth;
@@ -2583,49 +2603,70 @@ void Estimator::optimization() {
                 if (aligned_inv_depth > 0.01 && aligned_inv_depth < 10.0 &&  // Valid inv depth range
                     vins_metric_depth > 0.1 && vins_metric_depth < 100.0) {  // VIO depth reasonable
                   
-                  double adaptive_weight = WEIGHT;
+                  // ================================================================
+                  // TEMPORAL STABILITY CHECK: Skip or downweight unstable features
+                  // ================================================================
+                  bool should_add_prior = true;
+                  double temporal_weight_factor = 1.0;
                   
-                  // ================================================================
-                  // MAHALANOBIS DISTANCE-BASED WEIGHTING (Inverse Domain)
-                  // Only enabled if use_mahalanobis_weight == 1 in config
-                  // ================================================================
-                  if (params.use_mahalanobis_weight) {
-                    // Compute the discrepancy between VIO and aligned depth in inverse domain
-                    double inv_depth_error = vins_inv_depth - aligned_inv_depth;
-                    
-                    // Mahalanobis distance: d_M = |error - mean| / sqrt(variance)
-                    // This measures how many standard deviations away this measurement is
-                    double std_dev = std::sqrt(cached_inv_depth_variance);
-                    double mahalanobis_dist = std::abs(inv_depth_error - cached_inv_depth_mean_error) / (std_dev + 1e-8);
-                    
-                    // Adaptive weight based on Mahalanobis distance
-                    // Features with large discrepancy (outliers) get lower weight
-                    // Using a soft thresholding function: w = base_weight * exp(-k * d_M^2)
-                    // This gives:
-                    //   - Full weight when d_M ≈ 0 (measurement agrees with model)
-                    //   - Exponentially decreasing weight for outliers
-                    //   - k controls how quickly weight drops (k=0.5 means ~60% weight at 1 std dev)
-                    double k_mahal = 0.5;  // Tuning parameter for weight falloff
-                    double mahal_weight_factor = std::exp(-k_mahal * mahalanobis_dist * mahalanobis_dist);
-                    
-                    // Clamp minimum weight to avoid completely ignoring any measurement
-                    mahal_weight_factor = std::max(mahal_weight_factor, 0.1);
-                    
-                    adaptive_weight = WEIGHT * mahal_weight_factor;
+                  if (params.temporal_stable) {
+                    if (!it_per_id.depth_stable) {
+                      // Feature has flickering depth - skip adding absolute prior
+                      // It will still be eligible for ordinal constraints
+                      should_add_prior = false;
+                    } else {
+                      // Stable feature - optionally boost weight based on low variance
+                      // Lower variance = more confidence = higher weight
+                      double var_ratio = it_per_id.depth_variance / (params.temporal_stable_variance_thresh + 1e-8);
+                      temporal_weight_factor = std::max(0.5, 1.0 - var_ratio);  // Range [0.5, 1.0]
+                    }
                   }
                   
-                  // Add the depth prior factor with (optionally Mahalanobis-weighted) information
-                  // Pass residual_log flag to control log vs linear residual
-                  bool use_log_residual = (params.residual_log == 1);
-                  ceres::CostFunction* cost_function = 
-                      DepthPriorFactor::Create(aligned_inv_depth, adaptive_weight, use_log_residual);
-                  ceres::ResidualBlockId block_id = problem.AddResidualBlock(cost_function,
-                                          depth_align_loss_function,
-                                          para_Feature[feature_index]);
-                  diag.depth_block_ids.push_back(block_id);
-                  added_depth_factors++;
-                  diag.num_depth_prior_factors++;
-                  diag.total_depth_residuals++;
+                  if (should_add_prior) {
+                    double adaptive_weight = WEIGHT * temporal_weight_factor;
+                    
+                    // ================================================================
+                    // MAHALANOBIS DISTANCE-BASED WEIGHTING (Inverse Domain)
+                    // Only enabled if use_mahalanobis_weight == 1 in config
+                    // ================================================================
+                    if (params.use_mahalanobis_weight) {
+                      // Compute the discrepancy between VIO and aligned depth in inverse domain
+                      double inv_depth_error = vins_inv_depth - aligned_inv_depth;
+                      
+                      // Mahalanobis distance: d_M = |error - mean| / sqrt(variance)
+                      // This measures how many standard deviations away this measurement is
+                      double std_dev = std::sqrt(cached_inv_depth_variance);
+                      double mahalanobis_dist = std::abs(inv_depth_error - cached_inv_depth_mean_error) / (std_dev + 1e-8);
+                      
+                      // Adaptive weight based on Mahalanobis distance
+                      // Features with large discrepancy (outliers) get lower weight
+                      // Using a soft thresholding function: w = base_weight * exp(-k * d_M^2)
+                      // This gives:
+                      //   - Full weight when d_M ≈ 0 (measurement agrees with model)
+                      //   - Exponentially decreasing weight for outliers
+                      //   - k controls how quickly weight drops (k=0.5 means ~60% weight at 1 std dev)
+                      double k_mahal = 0.5;  // Tuning parameter for weight falloff
+                      double mahal_weight_factor = std::exp(-k_mahal * mahalanobis_dist * mahalanobis_dist);
+                      
+                      // Clamp minimum weight to avoid completely ignoring any measurement
+                      mahal_weight_factor = std::max(mahal_weight_factor, 0.1);
+                      
+                      adaptive_weight *= mahal_weight_factor;
+                    }
+                    
+                    // Add the depth prior factor with (optionally Mahalanobis-weighted) information
+                    // Pass residual_log flag to control log vs linear residual
+                    bool use_log_residual = (params.residual_log == 1);
+                    ceres::CostFunction* cost_function = 
+                        DepthPriorFactor::Create(aligned_inv_depth, adaptive_weight, use_log_residual);
+                    ceres::ResidualBlockId block_id = problem.AddResidualBlock(cost_function,
+                                            depth_align_loss_function,
+                                            para_Feature[feature_index]);
+                    diag.depth_block_ids.push_back(block_id);
+                    added_depth_factors++;
+                    diag.num_depth_prior_factors++;
+                    diag.total_depth_residuals++;
+                  }
                 }
               }
             }
@@ -2634,11 +2675,128 @@ void Estimator::optimization() {
       }
     }
   }  // end feature loop
+
+  if (params.temporal_stable && t_temporal_cost > 0.0) {
+      ROS_INFO("[Temporal] Time cost: %f ms", t_temporal_cost);
+  }
   
   // Report skipped outliers
   if (skipped_outliers > 0) {
     printf("\033[1;35m[PRE-OPT] Skipped %d features with high initial reprojection error\033[0m\n", 
            skipped_outliers);
+  }
+  
+  // =====================================================================
+  // ORDINAL DEPTH CONSTRAINTS (Relative depth ordering)
+  // Only enabled if params.ordinal_depth == 1
+  // =====================================================================
+  int added_ordinal_factors = 0;
+  
+  if (solver_flag == NON_LINEAR && params.ordinal_depth && params.use_depth && scale_is_initialized) {
+    TicToc t_ordinal;
+    // Collect features with valid depth measurements for ordinal pairing
+    // Structure: {feature_index, mono_inv_depth, frame_idx}
+    struct OrdinalCandidate {
+      int feature_index;
+      double mono_inv_depth;
+      int frame_idx;
+      int pixel_x, pixel_y;  // For spatial proximity check
+    };
+    
+    std::vector<OrdinalCandidate> candidates;
+    candidates.reserve(200);
+    
+    // Re-iterate features to collect ordinal candidates
+    // (We do this separately to avoid complicating the main feature loop)
+    int ordinal_feature_idx = -1;
+    for (auto &it_per_id : f_manager.feature) {
+      it_per_id.used_num = it_per_id.feature_per_frame.size();
+      if (it_per_id.used_num < 4) continue;
+      ++ordinal_feature_idx;
+      
+      int first_frame_idx = it_per_id.start_frame;
+      if (first_frame_idx > WINDOW_SIZE - 2) continue;
+      
+      double timestamp = Headers[first_frame_idx];
+      auto frame_it = all_image_frame.find(timestamp);
+      
+      if (frame_it != all_image_frame.end() && !frame_it->second.depth_map.empty()) {
+        const cv::Mat& depth_map = frame_it->second.depth_map;
+        auto feature_data_it = frame_it->second.points.find(it_per_id.feature_id);
+        
+        if (feature_data_it != frame_it->second.points.end()) {
+          const auto& measurement = feature_data_it->second[0].second;
+          int x_px = static_cast<int>(measurement(3));
+          int y_px = static_cast<int>(measurement(4));
+          
+          if (x_px >= 1 && x_px < depth_map.cols - 1 && 
+              y_px >= 1 && y_px < depth_map.rows - 1) {
+            float mono_inv_depth = depth_map.at<float>(y_px, x_px);
+            
+            if (mono_inv_depth > 0.001f) {
+              candidates.push_back({ordinal_feature_idx, mono_inv_depth, first_frame_idx, x_px, y_px});
+            }
+          }
+        }
+      }
+    }
+    
+    // Generate ordinal pairs: features in same frame with significant depth difference
+    std::vector<OrdinalPair> ordinal_pairs;
+    ordinal_pairs.reserve(params.ordinal_depth_max_pairs);
+    
+    for (size_t i = 0; i < candidates.size() && ordinal_pairs.size() < static_cast<size_t>(params.ordinal_depth_max_pairs); i++) {
+      for (size_t j = i + 1; j < candidates.size() && ordinal_pairs.size() < static_cast<size_t>(params.ordinal_depth_max_pairs); j++) {
+        // Only pair features from the same frame
+        if (candidates[i].frame_idx != candidates[j].frame_idx) continue;
+        
+        double diff = candidates[i].mono_inv_depth - candidates[j].mono_inv_depth;
+        double abs_diff = std::abs(diff);
+        
+        // Only create constraint if depth difference is significant
+        // (avoid constraining features at similar depths)
+        if (abs_diff > 0.05) {  // Significant inv-depth difference
+          OrdinalPair pair;
+          if (diff > 0) {
+            // i is closer (higher inv-depth)
+            pair.feature_idx_closer = candidates[i].feature_index;
+            pair.feature_idx_farther = candidates[j].feature_index;
+          } else {
+            // j is closer
+            pair.feature_idx_closer = candidates[j].feature_index;
+            pair.feature_idx_farther = candidates[i].feature_index;
+          }
+          pair.inv_depth_diff = abs_diff;
+          ordinal_pairs.push_back(pair);
+        }
+      }
+    }
+    
+    // Sort by confidence (larger depth difference = more confident ordering)
+    std::sort(ordinal_pairs.begin(), ordinal_pairs.end(),
+              [](const OrdinalPair& a, const OrdinalPair& b) {
+                return a.inv_depth_diff > b.inv_depth_diff;
+              });
+    
+    // Add ordinal constraints (limit to max_pairs)
+    int pairs_to_add = std::min(static_cast<int>(ordinal_pairs.size()), params.ordinal_depth_max_pairs);
+    for (int i = 0; i < pairs_to_add; i++) {
+      const auto& pair = ordinal_pairs[i];
+      
+      ceres::CostFunction* cost_function = 
+          OrdinalDepthFactor::Create(params.ordinal_depth_margin, params.ordinal_depth_weight);
+      problem.AddResidualBlock(cost_function,
+                               nullptr,  // No loss function - soft hinge built into factor
+                               para_Feature[pair.feature_idx_closer],
+                               para_Feature[pair.feature_idx_farther]);
+      added_ordinal_factors++;
+    }
+    
+    if (added_ordinal_factors > 0) {
+      printf("\033[1;35m[Ordinal Depth] Added %d ordinal constraints (margin=%.3f, w=%.2f)\033[0m\n",
+             added_ordinal_factors, params.ordinal_depth_margin, params.ordinal_depth_weight);
+    }
+    ROS_INFO("[Ordinal] Time cost: %f ms", t_ordinal.toc());
   }
   
   // Debug output
