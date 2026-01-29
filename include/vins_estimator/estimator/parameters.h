@@ -38,6 +38,8 @@ struct Parameters {
   double acc_n, acc_w;
   double gyr_n, gyr_w;
   std::string depth_engine_path;
+  std::string video_depth_engine_path;
+  int gating; // 0: Always add prior with weight=1.0, 1: Use variance gating
   std::vector<Eigen::Matrix3d> ric;
   std::vector<Eigen::Vector3d> tic;
 
@@ -125,6 +127,29 @@ struct Parameters {
   double ordinal_depth_margin;            // Min inv-depth difference to enforce ordering (default: 0.01)
   double ordinal_depth_weight;            // Weight for ordinal constraint factors (default: 1.0)
   int ordinal_depth_max_pairs;            // Max number of ordinal pairs per frame (default: 50)
+  double ordinal_depth_max_dist;          // Max spatial distance (pixels) between paired features
+  int ordinal_grid_enable;                // [LOKI] Enable Grid Filtering
+  double ordinal_depth_max_metric;        // [LOKI] Max metric depth to use (e.g. 50m)
+  int save_ordinal_debug;                 // [LOKI] Save debug images to disk
+  int ordinal_temporal_consistency;       // [LOKI] 0: disabled, 1: enabled - check depth history
+  int ordinal_consistency_min_frames;     // [LOKI] Min frames to verify (default 1)
+
+  // Multi-view depth fusion (Approach 2)
+  int mv_depth_fusion;                      // 0: disabled, 1: enabled - fuse depth across multiple viewpoints
+  int mv_depth_min_views;                   // Min viewpoints before trusting fused depth (default: 3)
+  double mv_depth_fusion_weight;            // Weight for fused depth prior factor (default: 1.0)
+
+  // Photometric regularization (Approach 3)
+  int photometric_reg;                      // 0: disabled, 1: enabled - image warping loss
+  double photometric_weight;                // Weight for photometric loss (default: 0.1)
+  int photometric_keyframe_gap;             // Min frame gap between keyframe pairs (default: 2)
+  double photometric_ssim_weight;           // SSIM portion weight (default: 0.85)
+  double photometric_l1_weight;             // L1 portion weight (default: 0.15)
+  
+  int video_mode;                           // 0: default, 1: video/stateful
+
+
+  int diagnostics;
 
   void read_from_file(const std::string &config_file);
 };

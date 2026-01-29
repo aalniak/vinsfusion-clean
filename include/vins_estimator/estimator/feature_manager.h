@@ -82,6 +82,10 @@ class FeaturePerId {
   double depth_variance = 1.0;        // Variance of depth_history (default high = unstable)
   bool depth_stable = false;          // True if variance < threshold
   
+  // Complementary Boosting Score (1.0 = Fully Trusted Depth, 0.0 = Rejected/Unstable)
+  // Used to boost Ordinal/Topological constraints when Metric Depth is unreliable.
+  double depth_confidence_score = 1.0;
+  
   void updateDepthHistory(double aligned_inv_depth, int buffer_size, double variance_thresh) {
     depth_history.push_back(aligned_inv_depth);
     if (static_cast<int>(depth_history.size()) > buffer_size) {
@@ -100,6 +104,69 @@ class FeaturePerId {
       depth_variance = 1.0;
       depth_stable = false;
     }
+  }
+
+  // =========================================================================
+  // Multi-view depth fusion (Approach 2)
+  // Track depth observations from multiple viewpoints and compute Bayesian fusion
+  // =========================================================================
+  struct DepthObservation {
+    double inv_depth;           // Aligned inverse depth observation
+    int frame_idx;              // Frame index when observed
+    Eigen::Vector3d cam_pos;    // Camera position in world frame when observing
+    double uncertainty;         // Uncertainty of this observation (default: 1.0)
+  };
+  std::vector<DepthObservation> mv_depth_observations;
+  double fused_inv_depth = -1.0;     // Bayesian fused inverse depth
+  double fused_inv_depth_var = 1.0;  // Fused variance (uncertainty)
+  bool has_fused_depth = false;      // True if fusion was computed with enough views
+  
+  // Add a new depth observation from a viewpoint
+  void addDepthObservation(double inv_d, int frame_idx, const Eigen::Vector3d& cam_pos, double uncertainty = 1.0) {
+    // Avoid duplicate observations from same frame
+    for (const auto& obs : mv_depth_observations) {
+      if (obs.frame_idx == frame_idx) return;
+    }
+    mv_depth_observations.push_back({inv_d, frame_idx, cam_pos, uncertainty});
+    
+    // Keep only recent observations (sliding window)
+    while (mv_depth_observations.size() > 10) {
+      mv_depth_observations.erase(mv_depth_observations.begin());
+    }
+  }
+  
+  // Compute Bayesian-fused depth from multiple observations
+  // Uses inverse-variance weighting: d_fused = Σ(d_i / σ_i²) / Σ(1 / σ_i²)
+  void computeFusedDepth(int min_views = 3) {
+    if (static_cast<int>(mv_depth_observations.size()) < min_views) {
+      has_fused_depth = false;
+      return;
+    }
+    
+    double weighted_sum = 0.0;
+    double weight_sum = 0.0;
+    
+    for (const auto& obs : mv_depth_observations) {
+      double weight = 1.0 / (obs.uncertainty * obs.uncertainty + 1e-8);
+      weighted_sum += obs.inv_depth * weight;
+      weight_sum += weight;
+    }
+    
+    if (weight_sum > 1e-8) {
+      fused_inv_depth = weighted_sum / weight_sum;
+      fused_inv_depth_var = 1.0 / weight_sum;  // Fused variance
+      has_fused_depth = true;
+    } else {
+      has_fused_depth = false;
+    }
+  }
+  
+  // Clear multi-view data (called on feature removal)
+  void clearMVDepth() {
+    mv_depth_observations.clear();
+    fused_inv_depth = -1.0;
+    fused_inv_depth_var = 1.0;
+    has_fused_depth = false;
   }
 };
 

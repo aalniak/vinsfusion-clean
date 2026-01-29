@@ -20,6 +20,9 @@
 #include <fstream>
 #include <algorithm>  // For std::sort, std::nth_element
 #include <vins_estimator/factor/ordinalDepthFactor.h>  // For OrdinalDepthFactor
+#include <vins_estimator/factor/fusedDepthFactor.h>    // For FusedDepthPriorFactor (MV fusion)
+#include <vins_estimator/utility/photometricLoss.h>    // For PhotometricLoss
+#include <vins_estimator/factor/photometricRegFactor.h> // For PhotometricRegFactor
 
 namespace vins::estimator {
 // ------- Depth factor declaration ------- 
@@ -318,7 +321,8 @@ void Estimator::changeSensorType(int use_imu, int use_stereo) {
 void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_img, 
                            const cv::Mat &_img1) {
   inputImageCnt++;
-  std::cout << "Processing frame number " << inputImageCnt << std::endl;
+  if (params.diagnostics)
+    std::cout << "Processing frame number " << inputImageCnt << std::endl;
   if (solver_flag == NON_LINEAR && nonlinear_input_cnt < 15)  {
     nonlinear_input_cnt++;
   }
@@ -371,8 +375,6 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         cv::Mat raw_inv_depth;
         if (!params.use_gt){
         // A. Run Inference (Small Image -> Small Float Map)
-        // For RGD blending, we need depth IMMEDIATELY for feature tracking.
-        // Use the direct/synchronous infer() method instead of async queue.
         if (params.video_mode && depthInfererVideo) {
              // SYNCHRONOUS: Use direct infer() for RGD - feature tracking can't wait
              raw_inv_depth = depthInfererVideo->infer(rgb_img);
@@ -382,9 +384,6 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         } else if (depthInferer) {
              raw_inv_depth = depthInferer->infer(rgb_img);
         }
- 
-
-        
         }
         else {
           // Use ground truth .tiff file from params.depth_folder/XXXXXX_lcam_front_depth.tiff
@@ -396,28 +395,23 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
           cv::Mat gt_depth = cv::imread(gt_depth_path, cv::IMREAD_UNCHANGED);
           if (gt_depth.empty()) {
               std::cerr << "Error: Could not load ground truth depth image from " << gt_depth_path << std::endl;
-              return;
+              // If GT fails, we might just return or skip
           }
           else{
             std::cout << "Loaded ground truth depth image from " << gt_depth_path << std::endl;
+            cv::divide(1.0, gt_depth, raw_inv_depth, 1.0, CV_32F);
           }
-          // convert to inverse depth
-          
-          cv::divide(1.0, gt_depth, raw_inv_depth, 1.0, CV_32F);
         }
-        double time_infer = t_infer.toc();
-        // --- TIMER: POST-PROCESSING ---
-        TicToc t_proc;
         
-        // [OPTIMIZATION A]: Math on Small Float Image (518x518)
-        // NOTE: We keep working in inverse depth space for numerical stability.
-        // Inverse depth is bounded [0, inf) -> [inf, 0) in metric, which avoids:
-        //   1. Division by near-zero depths
-        //   2. Unbounded values for distant objects
-        // The scale/shift fitting (s,t) is learned in inverse depth space:
-        //   metric_inv_depth = s * mono_inv_depth + t
-        //   metric_depth = 1.0 / metric_inv_depth (only when needed)
-        cv::Mat inv_depth = raw_inv_depth;  // Renamed for clarity - this IS inverse depth
+        // --- PROCESS DEPTH IF AVAILABLE ---
+        if (!raw_inv_depth.empty()) {
+             // --- SYNC BRANCH (Stateless / GT) ---
+            double time_infer = t_infer.toc();
+             // --- TIMER: POST-PROCESSING ---
+            TicToc t_proc;
+            
+             // [OPTIMIZATION A]: Math on Small Float Image (518x518)
+             cv::Mat inv_depth = raw_inv_depth;  // Renamed for clarity - this IS inverse depth
 
         // --- OPTIMIZATION: STRIDED SAMPLING (Approx 0.05ms) ---
         // We sample ~600 pixels to estimate the distribution.
@@ -543,6 +537,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         
         printf("[Depth] Infer: %.2f ms | Post-Proc: %.2f ms | Total Add: %.2f ms\n", 
                 time_infer, time_proc, time_infer + time_proc);
+        }
         
     } 
   // Else: img_for_tracker remains the original _img (Mono8)
@@ -697,7 +692,8 @@ void Estimator::processMeasurements() {
       processImage(feature.second, feature.first);
       prevTime = curTime;
 
-      printStatistics(*this, 0);
+      if (params.diagnostics)
+        printStatistics(*this, 0);
 
       std_msgs::Header header;
       header.frame_id = "world";
@@ -997,8 +993,8 @@ void Estimator::smartDepthInitialization() {
             cached_shift = best_t;
             scale_is_initialized = true;
         } else {
-            // Lower alpha (0.1) because RANSAC can jump a bit more than LS
-            double alpha = 0.1; 
+            // Lower alpha (0.15) because RANSAC can jump a bit more than LS
+            double alpha = 0.15; 
             cached_scale = (1.0 - alpha) * cached_scale + alpha * best_s;
             cached_shift = (1.0 - alpha) * cached_shift + alpha * best_t;
         }
@@ -1041,8 +1037,9 @@ void Estimator::smartDepthInitialization() {
                 cached_inv_depth_mean_error = (1.0 - var_alpha) * cached_inv_depth_mean_error + var_alpha * mean_error;
             }
             
-            printf("\033[1;33m[Depth Mahalanobis] Inv-depth variance=%.6f, mean_err=%.6f, n=%d\033[0m\n",
-                   cached_inv_depth_variance, cached_inv_depth_mean_error, variance_n);
+            double effective_gating = params.gating ? std::exp(-1000.0 * cached_inv_depth_variance) : 1.0;
+            printf("\033[1;33m[Depth Mahalanobis] Inv-depth variance=%.6f, mean_err=%.6f, n=%d, eff_gate=%.4f\033[0m\n",
+                   cached_inv_depth_variance, cached_inv_depth_mean_error, variance_n, effective_gating);
         }
     }
 
@@ -1057,8 +1054,12 @@ void Estimator::smartDepthInitialization() {
             if (it_per_id.feature_per_frame.size() < 2) continue;
 
             bool is_blind_guess = std::abs(it_per_id.estimated_depth - blind_guess_val) < 1e-4;
+            
+            // LOKI MODE: Oracle Initialization
+            // If fusion enabled, we aggressively initialize ANY unsolved feature using dense depth
+            bool oracle_needed = params.mv_depth_fusion && (it_per_id.solve_flag != 1);
 
-            if (is_blind_guess) {
+            if (is_blind_guess || oracle_needed) {
                 int first_frame_idx = it_per_id.start_frame;
                 double timestamp = Headers[first_frame_idx];
                 
@@ -1103,7 +1104,8 @@ void Estimator::smartDepthInitialization() {
             
           } 
           else{
-            std::cout << "Using highest inverse depth in neighborhood: " << depth_net_val << " instead of " << depth_net_initial << std::endl;
+            if (params.diagnostics)
+              std::cout << "Using highest inverse depth in neighborhood: " << depth_net_val << " instead of " << depth_net_initial << std::endl;
           }
                     float d_mono_inv = depth_net_val;
                     if (d_mono_inv > sky_threshold) {
@@ -1113,8 +1115,9 @@ void Estimator::smartDepthInitialization() {
                              double new_depth = 1.0 / pred_inv_depth;
                              
                              if(0.01 < new_depth < 40.0) {
+                              //this might be the bottleneck
                               double reproj_err = checkGeometricConsistency(it_per_id, new_depth);
-                              if (reproj_err > 20.0) {
+                              if (reproj_err > 100.0) {
                                  printf("[Zombie Killed] ID %d Rejected. Depth %.2fm caused %.2f px error.\n", 
                         it_per_id.feature_id, new_depth, reproj_err);
                                 continue; // Reject if reprojection error too high
@@ -1134,9 +1137,10 @@ void Estimator::smartDepthInitialization() {
     if (rescued_count > 0 || (valid_count > 0 && frame_count % 15 == 0)) {
         
         // Green text for visibility
-        printf("\033[1;32m[Smart Init] Learned s=%.4f, t=%.4f (based on %d features) | RESCUED %d features!\033[0m\n", 
+        printf("\033[1;32m[Smart Init] Learned s=%.4f, t=%.4f (based on %d features) | ORACLE/RESCUED %d features!\033[0m\n", 
                cached_scale, cached_shift, valid_count, rescued_count);
     }
+    
 }
 
 void Estimator::processImage(
@@ -1181,115 +1185,148 @@ void Estimator::processImage(
         //}
         //mCache.unlock();
 
-        mCache.lock(); // Lock once for the batch operation
-
-        // Iterate through the active VINS window (Indices 0 to WINDOW_SIZE-1)
-        // We skip WINDOW_SIZE (Index 10) because it's volatile.
-        for (int i = 0; i < WINDOW_SIZE-1; i++) {
-
-            double ts = Headers[i];
-
-            // 1. Check if this frame exists in our map
-            if (all_image_frame.find(ts) == all_image_frame.end()) continue;
-
-            ImageFrame &frame = all_image_frame.at(ts);
+        mCache.lock();
+        
+        // --- HARVEST COMPLETED DEPTHS (Optimized "Push" Pattern) ---
+        if (params.video_mode && depthInfererVideo) {
+            std::map<double, cv::Mat> ready_depths;
+            depthInfererVideo->get_completed_depths(ready_depths);
             
-            // 2. If it has no depth, it needs it NOW (it has survived long enough)
-            if (frame.depth_map.empty() && params.use_depth) {
-
-                // 3. Check if we still have the raw image in cache
-                if (image_cache.count(ts)) {
-                    ROS_INFO("Lazy Inference: Backfilling depth for Frame %.6f (Index %d)", ts, i);
-
-                    cv::Mat raw_depth_518;
-                    
-                    if (!params.use_gt) {
-                        // Run neural network inference
-                        cv::Mat raw_img = image_cache[ts];
-                        mCache.unlock(); 
-                        if (params.video_mode && depthInfererVideo) {
-                            // For video mode, try to get from async queue first
-                            raw_depth_518 = depthInfererVideo->get_depth(ts, 0);  // 0ms timeout
-                            if (raw_depth_518.empty()) {
-                                ROS_WARN("[Lazy] Video depth not ready for %.6f, submitting sync", ts);
-                                depthInfererVideo->input_image(ts, raw_img);
-                                raw_depth_518 = depthInfererVideo->get_depth(ts, 0);  
-                            }
-                        } else if (depthInferer) {
-                            raw_depth_518 = depthInferer->infer(raw_img);
-                        }
-                        mCache.lock();
-                    } else {
-                        // Load ground truth depth from file
-                        int frame_idx = frame_index_cache.count(ts) ? frame_index_cache[ts] : -1;
-                        if (frame_idx >= 0) {
-                            char frame_str[16];
-                            snprintf(frame_str, sizeof(frame_str), "%06d", frame_idx);
-                            std::string gt_depth_path = params.depth_folder + "/" + std::string(frame_str) + "_lcam_front_depth.tiff";
-                            
-                            cv::Mat gt_depth = cv::imread(gt_depth_path, cv::IMREAD_UNCHANGED);
-                            if (!gt_depth.empty()) {
-                                // Convert metric depth to inverse depth
-                                cv::divide(1.0, gt_depth, raw_depth_518, 1.0, CV_32F);
+            if (!ready_depths.empty()) {
+                //ROS_INFO("Harvested %lu depth maps.", ready_depths.size());
+                for (auto& [ts, depth] : ready_depths) {
+                    // 1. Inject into Active Window
+                    if (all_image_frame.count(ts)) {
+                        ImageFrame& frame = all_image_frame.at(ts);
+                        if (frame.depth_map.empty()) {
+                            // cv::Mat resized_depth; // Already resized in worker
+                            if (!depth.empty()) {
+                                // Depth from worker is now 1280x720 (or whatever input size was)
+                                frame.depth_map = depth.clone();
                                 
-                                std::cout << "Loaded ground truth depth image from " << gt_depth_path << std::endl;
-                              
-                            } else {
-                                ROS_WARN("Could not load GT depth from %s", gt_depth_path.c_str());
-                                continue;
+                                // Visualization (Optional)
+                                cv::Mat depth_vis;
+                                cv::normalize(frame.depth_map, depth_vis, 0, 255, cv::NORM_MINMAX);
+                                depth_vis.convertTo(depth_vis, CV_8UC1);
+                                pubDepthTrackImage(depth_vis, ts);
+                                
+                                //ROS_INFO("Lazy Inference: Matched Frame %.6f", ts);
+                                ROS_INFO("depthmap is found and embedded for %.6f", ts);
                             }
-                        } else {
-                            ROS_WARN("No frame index found for timestamp %.6f", ts);
-                            continue;
                         }
+                        // If successfully injected, we can clear the raw image from cache
+                        if (image_cache.count(ts)) image_cache.erase(ts);
                     }
-
-                    cv::Mat resized_depth;
-                    cv::resize(raw_depth_518, resized_depth, cv::Size(params.col, params.row));
-
-                    frame.depth_map = resized_depth.clone();
-                      if (!frame.depth_map.empty()) {
-                        // 1. Update the tracker with the REAL metric depth (don't normalize this!)
-                        
-
-                        // 2. Create a separate image just for visualization
-                        cv::Mat depth_vis;
-                        
-                        // Normalize: Map min_depth -> 0 and max_depth -> 255
-                        cv::normalize(resized_depth, depth_vis, 0, 255, cv::NORM_MINMAX);
-                        
-                        // Convert to 8-bit (standard image format)
-                        depth_vis.convertTo(depth_vis, CV_8UC1);
-
-                        // Optional: Apply a colormap (makes it easier to see relative depth)
-                        // cv::Mat depth_color;
-                        // cv::applyColorMap(depth_vis, depth_color, cv::COLORMAP_JET);
-                        //featureTracker.updateDepth(depth_vis);
-                        // 3. Save the visualization
-                        // Make sure you created the folder: mkdir -p /root/catkin_ws/debug_images
-                        
-                        //cv::Mat img = featureTracker.getTrackImage();
-                        //if (!img.empty() && !depth_vis.empty()){
-                        //    cv::imshow("RGB Track", img);
-                        //    cv::imshow("Depth Track", depth_vis);
-                        //    cv::waitKey(1);
-                        //}
-                        
-                        //if (inputImageCnt % 20 == 0) saveImageToFolder(depthTrack, "/datasets/vins_debug/", "example_rgb.png");
-
-                        pubDepthTrackImage(depth_vis, ts);
-                      }
-                    // NOW we can delete it from cache, we're done with it
-                    image_cache.erase(ts); 
-                } else {
-                     ROS_WARN("Lazy Inference Failed: RGB image for Frame %.6f missing from cache!", ts);
+                    // 2. What if it's the current frame? Handled below.
                 }
-            } else {
-                // If it already has depth, we can ensure the raw image is cleared to save RAM
-                if (image_cache.count(ts)) image_cache.erase(ts);
             }
         }
-
+        
+        // FUZZY LOOKUP (1ms tolerance)
+        //std::cout << "Debug: Locking mCache." << std::endl;
+        auto it = image_cache.lower_bound(header - 0.001);
+        //std::cout << "Debug: Lower bound found." << std::endl;
+        if (it != image_cache.end() && std::abs(it->first - header) < 0.0015) {
+             raw_img = it->second;
+             found = true;
+             // Do not erase yet, we might need it for photometric loop or backfill
+        } else {
+             // Fallback for exact match (rarely needed if fuzzy works)
+             //std::cout << "Debug: Checking exact match." << std::endl;
+             if (image_cache.count(header)) {
+                 raw_img = image_cache[header];
+                 found = true;
+             }
+        }
+        
+        // Iterate through the active VINS window (Indices 0 to WINDOW_SIZE-1)
+        // We skip WINDOW_SIZE (Index 10) because it's volatile.
+        //std::cout << "Debug: Starting loop." << std::endl;
+        // Maintenance: Clear raw images for frames that have successfully received depth
+        // This prevents memory bloat.
+        if (params.video_mode) {
+            for (int i = 0; i < WINDOW_SIZE - 1; i++) {
+                double ts = Headers[i];
+                if (all_image_frame.count(ts)) {
+                    if (!all_image_frame.at(ts).depth_map.empty()) {
+                        if (image_cache.count(ts)) image_cache.erase(ts);
+                    }
+                }
+            }
+        } else {
+            // --- LAZY INFERENCE BACKFILLING (Non-Video Mode) ---
+            // For frames in the window that don't have depth yet, run inference now
+            for (int i = 0; i < WINDOW_SIZE - 1; i++) {
+                double ts = Headers[i];
+                
+                // 1. Check if this frame exists in our map
+                if (all_image_frame.find(ts) == all_image_frame.end()) continue;
+                
+                ImageFrame &frame = all_image_frame.at(ts);
+                
+                // 2. If it has no depth, it needs it NOW (it has survived long enough)
+                if (frame.depth_map.empty() && params.use_depth) {
+                    
+                    // 3. Check if we still have the raw image in cache
+                    if (image_cache.count(ts)) {
+                        ROS_INFO("Lazy Inference: Backfilling depth for Frame %.6f (Index %d)", ts, i);
+                        
+                        cv::Mat raw_depth_518;
+                        
+                        if (!params.use_gt) {
+                            // Run neural network inference
+                            cv::Mat cached_img = image_cache[ts];
+                            mCache.unlock();
+                            raw_depth_518 = depthInferer->infer(cached_img);
+                            mCache.lock();
+                        } else {
+                            // Load ground truth depth from file
+                            int frame_idx = frame_index_cache.count(ts) ? frame_index_cache[ts] : -1;
+                            if (frame_idx >= 0) {
+                                char frame_str[16];
+                                snprintf(frame_str, sizeof(frame_str), "%06d", frame_idx);
+                                std::string gt_depth_path = params.depth_folder + "/" + std::string(frame_str) + "_lcam_front_depth.tiff";
+                                
+                                cv::Mat gt_depth = cv::imread(gt_depth_path, cv::IMREAD_UNCHANGED);
+                                if (!gt_depth.empty()) {
+                                    // Convert metric depth to inverse depth
+                                    cv::divide(1.0, gt_depth, raw_depth_518, 1.0, CV_32F);
+                                    std::cout << "Loaded ground truth depth image from " << gt_depth_path << std::endl;
+                                } else {
+                                    ROS_WARN("Could not load GT depth from %s", gt_depth_path.c_str());
+                                    continue;
+                                }
+                            } else {
+                                ROS_WARN("No frame index found for timestamp %.6f", ts);
+                                continue;
+                            }
+                        }
+                        
+                        if (!raw_depth_518.empty()) {
+                            cv::Mat resized_depth;
+                            cv::resize(raw_depth_518, resized_depth, cv::Size(params.col, params.row));
+                            frame.depth_map = resized_depth.clone();
+                            
+                            // Visualization
+                            cv::Mat depth_vis;
+                            cv::normalize(resized_depth, depth_vis, 0, 255, cv::NORM_MINMAX);
+                            depth_vis.convertTo(depth_vis, CV_8UC1);
+                            pubDepthTrackImage(depth_vis, ts);
+                            
+                            ROS_INFO("Lazy Inference: Depth injected for Frame %.6f", ts);
+                        }
+                        
+                        // Clear from cache after processing
+                        image_cache.erase(ts);
+                    } else {
+                        ROS_WARN_THROTTLE(1, "Lazy Inference Failed: RGB image for Frame %.6f missing from cache!", ts);
+                    }
+                } else {
+                    // If it already has depth, we can ensure the raw image is cleared to save RAM
+                    if (image_cache.count(ts)) image_cache.erase(ts);
+                }
+            }
+        }  
         // Cleanup: Ensure cache doesn't hold images older than the oldest window frame
         double oldest_time = Headers[0];
         for(auto it = image_cache.begin(); it != image_cache.end(); ) {
@@ -1304,23 +1341,22 @@ void Estimator::processImage(
         // 2. Run Inference
         if (found && params.use_depth && WEIGHT>0.0) {
         // 1. Run Inference (Returns 518x518)
-        cv::Mat raw_depth_518;
+        cv::Mat final_depth;
         if (params.video_mode && depthInfererVideo) {
-            // For video mode, try to get from async queue
-            raw_depth_518 = depthInfererVideo->get_depth(header, 0);  // 1ms timeout
-            if (raw_depth_518.empty()) {
-                ROS_WARN("[ProcessImage] Video depth not ready for %.6f, submitting sync", header);
-                depthInfererVideo->input_image(header, raw_img);
-                raw_depth_518 = depthInfererVideo->get_depth(header, 0);  // Wait longer
-            }
+             // ASYNC RETRIEVAL: Check if ready (0ms wait)
+             // result is now ALREADY resized
+             final_depth = depthInfererVideo->get_depth(header, 0);
         } else if (depthInferer) {
-            raw_depth_518 = depthInferer->infer(raw_img);
+             cv::Mat raw_depth = depthInferer->infer(raw_img);
+             if (!raw_depth.empty()) {
+                 cv::resize(raw_depth, final_depth, cv::Size(params.col, params.row));
+             }
         }
-        // 2. Resize to match VINS frame (1280x720)
-        // VINS expects features coordinates in the original resolution
-        if (!raw_depth_518.empty()) {
-            cv::resize(raw_depth_518, current_depth, cv::Size(params.col, params.row));
-        }
+        
+        if (!final_depth.empty()) {
+            current_depth = final_depth.clone();
+        } 
+        // No warning if empty - this is expected behavior for async mode.
         
         // --- DEBUG BLOCK START ---
         //double minVal, maxVal;
@@ -1340,6 +1376,16 @@ void Estimator::processImage(
   Headers[frame_count] = header;
   ImageFrame imageframe(image, header);
   imageframe.pre_integration = tmp_pre_integration;
+  
+  // [Added] attach raw image for photometric loss OR ordinal debugging
+  if (params.photometric_reg || params.ordinal_depth || params.use_depth) {
+      mCache.lock();
+      if (image_cache.count(header)) {
+          imageframe.raw_image = image_cache[header];
+      }
+      mCache.unlock();
+  }
+
   if (marginalization_flag == MARGIN_OLD) {
       imageframe.is_optimization_keyframe = true;
   } else {
@@ -1362,10 +1408,10 @@ void Estimator::processImage(
         cv::Mat grid_view;
     // Resize 1280x800 -> 32x20
     // INTER_AREA is best for decimation (downsampling) as it respects pixel area relations
-    cv::resize(current_depth, grid_view, cv::Size(32, 20), 0, 0, cv::INTER_AREA);
+    //cv::resize(current_depth, grid_view, cv::Size(32, 20), 0, 0, cv::INTER_AREA);
 
-    std::cout << "\n========== 32x20 DEPTH GRID ==========\n";
-    std::cout << std::fixed << std::setprecision(2); // Fix float formatting to 2 decimals
+    //std::cout << "\n========== 32x20 DEPTH GRID ==========\n";
+    //std::cout << std::fixed << std::setprecision(2); // Fix float formatting to 2 decimals
 
     for (int r = 0; r < grid_view.rows; ++r) {
         for (int c = 0; c < grid_view.cols; ++c) {
@@ -1777,7 +1823,7 @@ void Estimator::vector2double() {
       para_SpeedBias[i][2] = Vs[i].z();
 
       para_SpeedBias[i][3] = Bas[i].x();
-      para_SpeedBias[i][4] = Bas[i].y();
+      para_SpeedBias[i][4] = Bas[i].x();
       para_SpeedBias[i][5] = Bas[i].z();
 
       para_SpeedBias[i][6] = Bgs[i].x();
@@ -1958,13 +2004,15 @@ struct OptimizationDiagnostics {
   int num_reprojection_stereo_factors = 0;    // ProjectionTwoFrameTwoCamFactor  
   int num_reprojection_one_frame_factors = 0; // ProjectionOneFrameTwoCamFactor
   int num_depth_prior_factors = 0;
+  int num_ordinal_factors = 0; // [LOKI] Added
   
   // Residual dimensions (total)
   int total_marginalization_residuals = 0;
   int total_imu_residuals = 0;
   int total_visual_residuals = 0;
   int total_depth_residuals = 0;
-  
+  int total_ordinal_residuals = 0; // [LOKI] Added
+
   // Feature statistics
   int num_features_in_optimization = 0;
   int num_features_tracked_long = 0;  // tracked >= 4 frames
@@ -1974,6 +2022,7 @@ struct OptimizationDiagnostics {
   std::vector<ceres::ResidualBlockId> imu_block_ids;
   std::vector<ceres::ResidualBlockId> visual_block_ids;
   std::vector<ceres::ResidualBlockId> depth_block_ids;
+  std::vector<ceres::ResidualBlockId> ordinal_block_ids; // [LOKI] Added
   
   // Per-feature tracking for debugging spikes
   std::vector<FeatureCostInfo> feature_costs;
@@ -1988,6 +2037,8 @@ struct OptimizationDiagnostics {
   double visual_cost_final = 0.0;
   double depth_cost_initial = 0.0;
   double depth_cost_final = 0.0;
+  double ordinal_cost_initial = 0.0; // [LOKI] Added
+  double ordinal_cost_final = 0.0;   // [LOKI] Added
   
   // Add a new feature for per-feature cost tracking
   void addFeature(int feature_id, int feature_index, int start_frame, int num_obs, double inv_depth) {
@@ -2109,8 +2160,10 @@ struct OptimizationDiagnostics {
   void evaluateInitialCosts(ceres::Problem& problem) {
     marginalization_cost_initial = evaluateGroupCost(problem, marginalization_block_ids);
     imu_cost_initial = evaluateGroupCost(problem, imu_block_ids);
-    visual_cost_initial = evaluateGroupCost(problem, visual_block_ids);
+    visual_cost_initial = evaluateGroupCost(problem, visual_block_ids);    // Depth
     depth_cost_initial = evaluateGroupCost(problem, depth_block_ids);
+    // Ordinal
+    ordinal_cost_initial = evaluateGroupCost(problem, ordinal_block_ids);
   }
   
   void evaluateFinalCosts(ceres::Problem& problem) {
@@ -2118,6 +2171,7 @@ struct OptimizationDiagnostics {
     imu_cost_final = evaluateGroupCost(problem, imu_block_ids);
     visual_cost_final = evaluateGroupCost(problem, visual_block_ids);
     depth_cost_final = evaluateGroupCost(problem, depth_block_ids);
+    ordinal_cost_final = evaluateGroupCost(problem, ordinal_block_ids);
   }
   
   void print() const {
@@ -2139,6 +2193,8 @@ struct OptimizationDiagnostics {
            num_reprojection_one_frame_factors, num_reprojection_one_frame_factors * 2);
     printf("║ Depth Prior                    │ %7d │ %7d (1 each)    ║\n", 
            num_depth_prior_factors, total_depth_residuals);
+    printf("║ Ordinal Prior                  │ %7d │ %7d (1 each)    ║\n", 
+           num_ordinal_factors, total_ordinal_residuals);
     printf("╠════════════════════════════════════════════════════════════════╣\n");
     
     int total_factors = num_marginalization_factors + num_imu_factors + 
@@ -2159,9 +2215,9 @@ struct OptimizationDiagnostics {
   
   void printCostBreakdown() const {
     double total_initial = marginalization_cost_initial + imu_cost_initial + 
-                          visual_cost_initial + depth_cost_initial;
+                          visual_cost_initial + depth_cost_initial + ordinal_cost_initial;
     double total_final = marginalization_cost_final + imu_cost_final + 
-                        visual_cost_final + depth_cost_final;
+                        visual_cost_final + depth_cost_final + ordinal_cost_final;
     
     printf("\n");
     printf("╔═════════════════════════════════════════════════════════════════════════════════╗\n");
@@ -2181,6 +2237,7 @@ struct OptimizationDiagnostics {
     printRow("IMU Preintegration", imu_cost_initial, imu_cost_final);
     printRow("Visual Reprojection", visual_cost_initial, visual_cost_final);
     printRow("Depth Prior", depth_cost_initial, depth_cost_final);
+    printRow("Ordinal Prior", ordinal_cost_initial, ordinal_cost_final);
     
     printf("╠───────────────────────┼────────────────┼────────────────┼──────────────┼───────╣\n");
     printRow("TOTAL", total_initial, total_final);
@@ -2189,19 +2246,22 @@ struct OptimizationDiagnostics {
     // Print percentage contribution of each factor group
     printf("║ Cost Distribution (Initial):                                                    ║\n");
     if (total_initial > 1e-10) {
-      printf("║   Marginalization: %5.1f%% | IMU: %5.1f%% | Visual: %5.1f%% | Depth: %5.1f%%        ║\n",
+      printf("║   Marg: %4.1f%% | IMU: %4.1f%% | Vis: %4.1f%% | Dep: %4.1f%% | Ord: %4.1f%%     ║\n",
              100.0 * marginalization_cost_initial / total_initial,
              100.0 * imu_cost_initial / total_initial,
              100.0 * visual_cost_initial / total_initial,
-             100.0 * depth_cost_initial / total_initial);
+             100.0 * depth_cost_initial / total_initial,
+             100.0 * ordinal_cost_initial / total_initial);
     }
+
     printf("║ Cost Distribution (Final):                                                      ║\n");
     if (total_final > 1e-10) {
-      printf("║   Marginalization: %5.1f%% | IMU: %5.1f%% | Visual: %5.1f%% | Depth: %5.1f%%        ║\n",
+      printf("║   Marg: %4.1f%% | IMU: %4.1f%% | Vis: %4.1f%% | Dep: %4.1f%% | Ord: %4.1f%%     ║\n",
              100.0 * marginalization_cost_final / total_final,
              100.0 * imu_cost_final / total_final,
              100.0 * visual_cost_final / total_final,
-             100.0 * depth_cost_final / total_final);
+             100.0 * depth_cost_final / total_final,
+             100.0 * ordinal_cost_final / total_final);
     }
     printf("╚═════════════════════════════════════════════════════════════════════════════════╝\n\n");
   }
@@ -2309,11 +2369,22 @@ struct OptimizationDiagnostics {
 };
 
 void Estimator::optimization() {
-  std::cout << "\n========== DEBUG: Optimization all_image_frame STATUS ==========" << std::endl;
-  std::cout << "Current Window Size: " << frame_count << std::endl;
-  
-  // Initialize diagnostics tracker
-  // [COMMENTED OUT FOR PERFORMANCE] OptimizationDiagnostics diag;
+  if (params.diagnostics) {
+    std::cout << "\n========== DEBUG: Optimization all_image_frame STATUS ==========" << std::endl;
+    std::cout << "Current Window Size: " << frame_count << std::endl;
+  }
+  TicToc t_opt;
+  // [COMMENTED OUT FOR PERFORMANCE] Initialize diagnostics tracker
+  // OptimizationDiagnostics diag;
+
+  // [Added] Compute fused depth for all features before optimization
+  if (params.mv_depth_fusion) {
+      TicToc t_fused;
+      for (auto &it_per_id : f_manager.feature) {
+           it_per_id.computeFusedDepth(params.mv_depth_min_views);
+      }
+      ROS_INFO("[MultiView Fusion] Compute time: %f ms", t_fused.toc());
+  }
   
   int added_depth_factors = 0;
   int idx = 0;
@@ -2345,10 +2416,12 @@ void Estimator::optimization() {
   //std::cout << "=========================================================\n" << std::endl;
 
   TicToc t_whole;
-  TicToc t_prepare;
+  TicToc t_setup; // Time setup/vector conversion
   vector2double();
-  int qualified = 0;
-  
+  // ...
+  double t_setup_cost = t_setup.toc();
+
+  TicToc t_prep; // Problem preparation
   ceres::Problem problem;
   ceres::LossFunction *loss_function;
 
@@ -2433,6 +2506,16 @@ void Estimator::optimization() {
   int skipped_outliers = 0;  // Count features skipped due to high initial error
   
   double t_temporal_cost = 0.0;
+  
+  // [LOKI DEBUG] Aggregate Stats for Variance Gate
+  double debug_sum_var = 0.0;
+  double debug_sum_gate = 0.0;
+  int debug_count_total = 0;
+  int debug_count_rejected = 0;
+  // [LOKI DEBUG] Temporal Stability Stats
+  int debug_temporal_candidates = 0;
+  int debug_temporal_rejected = 0;
+
   for (auto &it_per_id : f_manager.feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
     if (it_per_id.used_num < 4) continue;
@@ -2586,6 +2669,9 @@ void Estimator::optimization() {
     // and add a simple prior pulling VIO depths toward aligned mono depths.
 
     if (solver_flag == NON_LINEAR && params.use_depth && WEIGHT > 0.0 && scale_is_initialized) {
+      
+      // [Removed] Early Fusion Block - moved down to ensure data accumulation
+
       int first_frame_idx = it_per_id.start_frame;
       
       // Skip if not enough features for reliable alignment
@@ -2646,9 +2732,94 @@ void Estimator::optimization() {
                 // TEMPORAL STABILITY: Update depth history and check variance
                 // Only enabled if params.temporal_stable == 1
                 // ================================================================
+                // ================================================================
+                // DATA ACCUMULATION: Multi-View & Temporal
+                // ================================================================
+                
+                // 1. Multi-View Fusion Accumulation
+                if (params.mv_depth_fusion) {
+                    TicToc t_mv;
+                    it_per_id.clearMVDepth(); // CRITICAL: Clear outdated observations relative to old anchors
+                    int k = 0;
+                    for(auto &obs : it_per_id.feature_per_frame) {
+                        int view_frame_idx = it_per_id.start_frame + k;
+                        k++;
+                        if(view_frame_idx > WINDOW_SIZE) break;
+
+                        // Check if we have depth map for this view
+                        double ts_view = Headers[view_frame_idx];
+                        if (all_image_frame.count(ts_view) == 0) continue;
+                        const ImageFrame &view_frame = all_image_frame[ts_view];
+                        if (view_frame.depth_map.empty()) continue;
+
+                        // Find the feature observation in this frame to get pixels
+                        auto it_pt = view_frame.points.find(it_per_id.feature_id);
+                        if (it_pt == view_frame.points.end()) continue;
+                        
+                        // Sample Depth (Robust Median)
+                        double u_px = it_pt->second[0].second(3);
+                        double v_px = it_pt->second[0].second(4);
+                        int col = view_frame.depth_map.cols;
+                        int row = view_frame.depth_map.rows;
+                        
+                        if (u_px < 2 || u_px >= col - 2 || v_px < 2 || v_px >= row - 2) continue;
+                        
+                        // Collect 3x3 patch
+                        std::vector<float> patch_vals;
+                        patch_vals.reserve(9);
+                        for (int dy = -1; dy <= 1; dy++) {
+                           for (int dx = -1; dx <= 1; dx++) {
+                               float val = view_frame.depth_map.at<float>((int)v_px + dy, (int)u_px + dx);
+                               if (val > 0.001f) patch_vals.push_back(val);
+                           }
+                        }
+                        
+                        if (patch_vals.size() >= 5) {
+                            std::nth_element(patch_vals.begin(), patch_vals.begin() + patch_vals.size()/2, patch_vals.end());
+                            float d_view_raw = patch_vals[patch_vals.size()/2];
+                            
+                            // 2. Reproject to Start Frame
+                            // 2. Reproject to Start Frame
+                            // NOTE: d_view_raw is INVERSE DEPTH (Disparity)
+                            double d_view_inv = cached_scale * d_view_raw + cached_shift;
+                            
+                            // Check for validity (must be positive)
+                            if (d_view_inv < 1e-3) continue;
+                            
+                            double d_view_Z = 1.0 / d_view_inv;
+                            
+                            // P_view_norm is (x,y,1) in normalized plane
+                            Vector3d P_view_norm(it_pt->second[0].second(0), it_pt->second[0].second(1), 1.0);
+                            Vector3d P_view_cam = P_view_norm * d_view_Z;
+                            
+                            // Transform C_view -> Body_view -> World -> Body_start -> C_start
+                            Vector3d P_view_body = ric[0] * P_view_cam + tic[0];
+                            Vector3d P_world = Rs[view_frame_idx] * P_view_body + Ps[view_frame_idx];
+                            Vector3d P_start_body = Rs[it_per_id.start_frame].transpose() * (P_world - Ps[it_per_id.start_frame]);
+                            Vector3d P_start_cam = ric[0].transpose() * (P_start_body - tic[0]);
+                            
+                            if (P_start_cam.z() > 0.1) {
+                                double inv_d_start = 1.0 / P_start_cam.z();
+                                
+                                // DEBUG PRINT (Sampled)
+                                // DEBUG PRINT (Sampled)
+                                if (k == 1) { // Print only for one view per feature to avoid spam
+                                   //printf("MV SAMPLE: Feat %d | ViewFrame %d | Raw %.3f | Scale %.3f | InvAligned %.3f | Z_view %.3f | Z_start %.3f | InvD %.3f\n", 
+                                     //     it_per_id.feature_id, view_frame_idx, d_view_raw, cached_scale, d_view_inv, d_view_Z, P_start_cam.z(), inv_d_start);
+                                }
+
+                                // Add observation (uncertainty = 1.0 for now)
+                                it_per_id.addDepthObservation(inv_d_start, view_frame_idx, Ps[view_frame_idx], 1.0);
+                            }
+                        }
+                    }
+                    // t_temporal_cost += t_mv.toc(); // Optional: track cost
+                }
+
+                // 2. Temporal Stability Update (Legacy / Hybrid)
                 if (params.temporal_stable) {
                   TicToc t_temp;
-                  // Update the feature's depth history with this aligned measurement
+                  // Update the feature's depth history with the anchor frame measurement
                   it_per_id.updateDepthHistory(aligned_inv_depth, 
                                                 params.temporal_stable_buffer_size,
                                                 params.temporal_stable_variance_thresh);
@@ -2662,72 +2833,162 @@ void Estimator::optimization() {
                 if (aligned_inv_depth > 0.01 && aligned_inv_depth < 10.0 &&  // Valid inv depth range
                     vins_metric_depth > 0.1 && vins_metric_depth < 100.0) {  // VIO depth reasonable
                   
+                  // Debug print for success
+                  //std::cout << "Debug: Depth Check Valid. Aligned=" << aligned_inv_depth << " VINS=" << vins_metric_depth << std::endl;
                   // ================================================================
-                  // TEMPORAL STABILITY CHECK: Skip or downweight unstable features
+                  // BRANCH: MULTI-VIEW FUSION vs STANDARD DEPTH PRIOR
                   // ================================================================
-                  bool should_add_prior = true;
-                  double temporal_weight_factor = 1.0;
-                  
-                  if (params.temporal_stable) {
-                    if (!it_per_id.depth_stable) {
-                      // Feature has flickering depth - skip adding absolute prior
-                      // It will still be eligible for ordinal constraints
-                      should_add_prior = false;
-                    } else {
-                      // Stable feature - optionally boost weight based on low variance
-                      // Lower variance = more confidence = higher weight
-                      double var_ratio = it_per_id.depth_variance / (params.temporal_stable_variance_thresh + 1e-8);
-                      temporal_weight_factor = std::max(0.5, 1.0 - var_ratio);  // Range [0.5, 1.0]
-                    }
+                  if (params.mv_depth_fusion) {
+                      // [Approach 2] Multi-View Depth Fusion
+                      // Re-compute fused depth with the latest data we just added
+                      it_per_id.computeFusedDepth(params.mv_depth_min_views);
+                      
+                      // STRICT MODE: Only use mature features AND within 20m range
+                      if (it_per_id.has_fused_depth && vins_metric_depth < 20.0) {
+                          double weight = params.mv_depth_fusion_weight * WEIGHT;
+                          
+                          // DEBUG PRINT
+                          // printf("FUSION DEBUG: Feat %d | VIO %.3f | Fused %.3f | WEIGHT %.1f | FusionW %.1f | Var %.5f | SqrtInfo %.3f\n",
+                          //         it_per_id.feature_id, para_Feature[feature_index][0], it_per_id.fused_inv_depth, 
+                          //         WEIGHT, weight, it_per_id.fused_inv_depth_var, 
+                          //         1.0/std::sqrt(it_per_id.fused_inv_depth_var + 1e-8));
+                          
+                          
+                          ceres::CostFunction* f = WeightedFusedDepthFactor::Create(it_per_id.fused_inv_depth, 
+                                                                                  it_per_id.fused_inv_depth_var,
+                                                                                  weight);
+                          
+                          // [LOKI MODE] ORACLE ONLY: Use dense depth for initialization (above), 
+                          // but DO NOT add optimization factors as they degrade RMSE.
+                          // ceres::ResidualBlockId block_id = problem.AddResidualBlock(f, loss_function, para_Feature[feature_index]);
+                          // diag.depth_block_ids.push_back(block_id);
+                          // added_depth_factors++;
+                          // diag.num_depth_prior_factors++;
+                          // diag.total_depth_residuals++;
+                      }
+                      // If not mature, do nothing (Skip standard prior)
                   }
                   
-                  if (should_add_prior) {
-                    double adaptive_weight = WEIGHT * temporal_weight_factor;
-                    
-                    // ================================================================
-                    // MAHALANOBIS DISTANCE-BASED WEIGHTING (Inverse Domain)
-                    // Only enabled if use_mahalanobis_weight == 1 in config
-                    // ================================================================
-                    if (params.use_mahalanobis_weight) {
-                      // Compute the discrepancy between VIO and aligned depth in inverse domain
-                      double inv_depth_error = vins_inv_depth - aligned_inv_depth;
+                  // [LOKI FIX]: Always fall through to Approach 1 (Standard Prior) even if Fusion is on.
+                  // This allows Oracle (Fusion=ON) to coexist with Standard Factors.
+                  if (true) {
+                  // else {
+                      // [Approach 1] Standard Temporal Stability + Prior
                       
-                      // Mahalanobis distance: d_M = |error - mean| / sqrt(variance)
-                      // This measures how many standard deviations away this measurement is
-                      double std_dev = std::sqrt(cached_inv_depth_variance);
-                      double mahalanobis_dist = std::abs(inv_depth_error - cached_inv_depth_mean_error) / (std_dev + 1e-8);
+                      // TEMPORAL STABILITY CHECK: Skip or downweight unstable features
+                      bool should_add_prior = true;
+                      double temporal_weight_factor = 1.0;
                       
-                      // Adaptive weight based on Mahalanobis distance
-                      // Features with large discrepancy (outliers) get lower weight
-                      // Using a soft thresholding function: w = base_weight * exp(-k * d_M^2)
-                      // This gives:
-                      //   - Full weight when d_M ≈ 0 (measurement agrees with model)
-                      //   - Exponentially decreasing weight for outliers
-                      //   - k controls how quickly weight drops (k=0.5 means ~60% weight at 1 std dev)
-                      double k_mahal = 0.5;  // Tuning parameter for weight falloff
-                      double mahal_weight_factor = std::exp(-k_mahal * mahalanobis_dist * mahalanobis_dist);
+                      if (params.temporal_stable) {
+                        debug_temporal_candidates++;
+                        if (!it_per_id.depth_stable) {
+                          debug_temporal_rejected++;
+                          should_add_prior = false;
+                        } else {
+                          double var_ratio = it_per_id.depth_variance / (params.temporal_stable_variance_thresh + 1e-8);
+                          temporal_weight_factor = std::max(0.5, 1.0 - var_ratio);
+                        }
+                      }
                       
-                      // Clamp minimum weight to avoid completely ignoring any measurement
-                      mahal_weight_factor = std::max(mahal_weight_factor, 0.1);
+                      // [LOKI MODE] Oracle Implementation:
+                      // If Fusion/Oracle is enabled, we trust the dense depth map implicitly.
+                      // Bypass stability check and force addition of the standard Depth Prior.
+                      // [LOKI MODE] Variance-Gated Fusion + Complementary Boosting
+                      // 1. Get Variance (SWITCHED TO SAMPLE VARIANCE OF MULTI-VIEW OBSERVATIONS)
+                      double depth_var = 1.0;
+                      int sample_count = 0;
                       
-                      adaptive_weight *= mahal_weight_factor;
-                    }
-                    
-                    // Add the depth prior factor with (optionally Mahalanobis-weighted) information
-                    // Pass residual_log flag to control log vs linear residual
-                    bool use_log_residual = (params.residual_log == 1);
-                    ceres::CostFunction* cost_function = 
-                        DepthPriorFactor::Create(aligned_inv_depth, adaptive_weight, use_log_residual);
-                    ceres::ResidualBlockId block_id = problem.AddResidualBlock(cost_function,
-                                            depth_align_loss_function,
-                                            para_Feature[feature_index]);
-                    // [COMMENTED OUT FOR PERFORMANCE]
-                    // diag.depth_block_ids.push_back(block_id);
-                    added_depth_factors++;
-                    // diag.num_depth_prior_factors++;
-                    // diag.total_depth_residuals++;
-                  }
-                }
+                      if (it_per_id.mv_depth_observations.size() >= 2) {
+                          // Compute Sample Variance of the reprojected depths
+                          double mean = 0.0;
+                          for (const auto& obs : it_per_id.mv_depth_observations) mean += obs.inv_depth;
+                          mean /= it_per_id.mv_depth_observations.size();
+                          
+                          double sq_diff_sum = 0.0;
+                          for (const auto& obs : it_per_id.mv_depth_observations) {
+                              sq_diff_sum += (obs.inv_depth - mean) * (obs.inv_depth - mean);
+                          }
+                          depth_var = sq_diff_sum / (it_per_id.mv_depth_observations.size() - 1); // Unbiased
+                          sample_count = it_per_id.mv_depth_observations.size();
+                      } else {
+                          // Not enough samples to judge stability -> Assume High Variance (Distrust)
+                          // Unless we have at least one sample and we want to trust it initially?
+                          // Let's stick to strict: need variance to trust.
+                          depth_var = 1.0; 
+                      }
+
+                      // 2. Compute Sharp Gate: exp(-lambda * variance)
+                      const double GATE_LAMBDA = 1000.0; 
+                      double variance_gate = std::exp(-GATE_LAMBDA * depth_var);
+                      
+                      // 3. Oracle Boost (Allow initialization)
+                      if (params.mv_depth_fusion) {
+                          // [LOKI FIX] Hard Rejection enforced. Do not override should_add_prior.
+                          temporal_weight_factor = std::max(0.05, variance_gate); 
+                      } else {
+                          if (params.gating) {
+                             temporal_weight_factor = variance_gate;
+                             // Standard mode: requires stability
+                             if (sample_count < 2 || depth_var > 0.1) {
+                                 //std::cout << "Debug: REJECTING Prior! SampleCount=" << sample_count << " Var=" << depth_var << std::endl;
+                                 should_add_prior = false;
+                             }
+                          } else if (!params.temporal_stable) {
+                             // Gating Disabled AND Temporal Stability Disabled: Full trust, no weighting
+                             temporal_weight_factor = 1.0;
+                             should_add_prior = true;
+                          }
+                          // else: Gating disabled but Temporal Stability enabled
+                          // Keep temporal_weight_factor from temporal_stable logic above
+                          // Keep should_add_prior from temporal_stable logic above
+                          // temporal_weight_factor = 1.0; // OVERRIDE
+                      }
+
+                      if (should_add_prior) {
+                        //std::cout << "Debug: Adding Prior! aligned=" << aligned_inv_depth << " W=" << temporal_weight_factor << std::endl;
+                        // [LOKI FIX] Reverted Normalization per user request. 
+                        // Using raw WEIGHT (usually 1.0 or user set).
+                        double adaptive_weight = WEIGHT * temporal_weight_factor;
+                        
+                        // MAHALANOBIS CHECK
+                        double mahal_weight_factor = 1.0;
+                        double mahalanobis_dist = 0.0;
+                        
+                        if (params.use_mahalanobis_weight) {
+                          double inv_depth_error = vins_inv_depth - aligned_inv_depth;
+                          double std_dev = std::sqrt(cached_inv_depth_variance);
+                          mahalanobis_dist = std::abs(inv_depth_error - cached_inv_depth_mean_error) / (std_dev + 1e-8);
+                          
+                          double k_mahal = 0.5;
+                          mahal_weight_factor = std::exp(-k_mahal * mahalanobis_dist * mahalanobis_dist);
+                          mahal_weight_factor = std::max(mahal_weight_factor, 0.1);
+                          adaptive_weight *= mahal_weight_factor;
+                        }
+
+                        // [LOKI DEBUG] Accumulate stats
+                        debug_sum_var += depth_var;
+                        debug_sum_gate += variance_gate;
+                        debug_count_total++;
+                        
+                        /* Single sample print removed to reduce spam, using aggregate at end */
+                        
+                        bool use_log_residual = (params.residual_log == 1);
+                        ceres::CostFunction* cost_function = 
+                            DepthPriorFactor::Create(aligned_inv_depth, adaptive_weight, use_log_residual);
+                        ceres::ResidualBlockId block_id = problem.AddResidualBlock(cost_function,
+                                                depth_align_loss_function,
+                                                para_Feature[feature_index]);
+                        // [COMMENTED OUT FOR PERFORMANCE]
+                        // diag.depth_block_ids.push_back(block_id);
+                        added_depth_factors++;
+                        // diag.num_depth_prior_factors++;
+                        // diag.total_depth_residuals++;
+                      }
+                  } // End Standard Path
+                  
+                } else {
+                     //std::cout << "Debug: Depth Check FAILED. Aligned=" << aligned_inv_depth << " VINS=" << vins_metric_depth << std::endl;
+                } // End Sanity checks
               }
             }
           }
@@ -2735,6 +2996,64 @@ void Estimator::optimization() {
       }
     }
   }  // end feature loop
+  
+  if (params.temporal_stable && debug_temporal_candidates > 0) {
+      printf("\033[1;36m[Temporal Stability] Processed: %d | Rejected: %d | Survival Rate: %.1f%%\033[0m\n", 
+             debug_temporal_candidates, debug_temporal_rejected, 
+             100.0 * (1.0 - (double)debug_temporal_rejected / debug_temporal_candidates));
+  }
+  
+  // [Added] Photometric Regularization (Approach 3)
+  // [RESEARCH-ENGINEER CRITIQUE]: Photometric Regularization via Numeric Differentiation is 
+  // computationally intractable for real-time VIO (O(14*N) vs O(1)).
+  // Strict Recommendation: Disable until Analytic Gradients are implemented.
+  if (0) { // params.photometric_reg) {
+      TicToc t_photo;
+      int added_photo_factors = 0;
+      Eigen::Matrix3d K_mat;
+      K_mat << params.fx, 0, params.cx,
+               0, params.fy, params.cy,
+               0, 0, 1;
+               
+      for (int i = 0; i < WINDOW_SIZE; i++) {
+          // Pick a Target Frame j (older)
+          if (i < params.photometric_keyframe_gap) continue;
+          int j = i - params.photometric_keyframe_gap;
+          
+          double t_i = Headers[i];
+          double t_j = Headers[j];
+          
+          // Check existence
+          if (all_image_frame.count(t_i) && all_image_frame.count(t_j)) {
+              ImageFrame& frame_i = all_image_frame[t_i];
+              ImageFrame& frame_j = all_image_frame[t_j];
+              
+              // Ensure we have raw images and source depth
+              if (!frame_i.raw_image.empty() && !frame_j.raw_image.empty() && !frame_i.depth_map.empty()) {
+                  
+                  // Create Photometric Factor
+                  // Optimizes para_Pose[i] and para_Pose[j]
+                  TicToc t_create;
+                  ceres::CostFunction* f = PhotometricRegFactor::Create(
+                      frame_i.raw_image, frame_j.raw_image, frame_i.depth_map, 
+                      K_mat,
+                      params.photometric_weight * WEIGHT,
+                      params.photometric_ssim_weight,
+                      params.photometric_l1_weight
+                  );
+                  
+                  if (t_create.toc() > 5.0) {
+                      printf("\033[1;34m[Photometric] Factor %d-%d creation: %.2f ms\033[0m\n", i, j, t_create.toc());
+                  }
+
+                  // Add to problem
+                  problem.AddResidualBlock(f, loss_function, para_Pose[i], para_Pose[j]);
+                  added_photo_factors++;
+              }
+          }
+      }
+      printf("\033[1;34m[Photometric Reg] Added %d factors. Total Time: %.2f ms\033[0m\n", added_photo_factors, t_photo.toc());
+  }
 
   if (params.temporal_stable && t_temporal_cost > 0.0) {
       ROS_INFO("[Temporal] Time cost: %f ms", t_temporal_cost);
@@ -2742,29 +3061,34 @@ void Estimator::optimization() {
   
   // Report skipped outliers
   if (skipped_outliers > 0) {
-    printf("\033[1;35m[PRE-OPT] Skipped %d features with high initial reprojection error\033[0m\n", 
-           skipped_outliers);
+    printf("\033[1;35m[PRE-OPT] Skipped %d features with high initial reprojection error\033[0m\n", skipped_outliers);
   }
+  
+  double t_prep_cost = t_prep.toc();
+
   
   // =====================================================================
   // ORDINAL DEPTH CONSTRAINTS (Relative depth ordering)
-  // Only enabled if params.ordinal_depth == 1
+  // Only enabled if params.ordinal_depth == 1 AND currently inserting a Keyframe
   // =====================================================================
-  int added_ordinal_factors = 0;
-  
-  if (solver_flag == NON_LINEAR && params.ordinal_depth && params.use_depth && scale_is_initialized) {
+  // [LOKI DEBUG] Trace Ordinal Logic
+  int added_ordinal_factors = 0; // [LOKI] Re-declared
+  if (params.ordinal_depth && solver_flag == NON_LINEAR) {
+      if (!params.use_depth) ROS_WARN_THROTTLE(1.0, "[Ordinal] Skipped: use_depth is FALSE");
+      else if (!scale_is_initialized) ROS_WARN_THROTTLE(1.0, "[Ordinal] Skipped: Scale NOT Initialized");
+      else if (marginalization_flag != MARGIN_OLD) {
+           ROS_WARN_THROTTLE(1.0, "[Ordinal] Skipped: Not a Keyframe (Margin Flag %d)", marginalization_flag);
+      } else {
+           ROS_WARN_THROTTLE(1.0, "[Ordinal] Keyframe Logic Active! Candidates: Calculating...");
+      }
+  }
+
+  if (solver_flag == NON_LINEAR && params.ordinal_depth && params.use_depth && scale_is_initialized && marginalization_flag == MARGIN_OLD) {
     TicToc t_ordinal;
-    // Collect features with valid depth measurements for ordinal pairing
-    // Structure: {feature_index, mono_inv_depth, frame_idx}
-    struct OrdinalCandidate {
-      int feature_index;
-      double mono_inv_depth;
-      int frame_idx;
-      int pixel_x, pixel_y;  // For spatial proximity check
-    };
-    
     std::vector<OrdinalCandidate> candidates;
     candidates.reserve(200);
+    
+
     
     // Re-iterate features to collect ordinal candidates
     // (We do this separately to avoid complicating the main feature loop)
@@ -2776,6 +3100,10 @@ void Estimator::optimization() {
       
       int first_frame_idx = it_per_id.start_frame;
       if (first_frame_idx > WINDOW_SIZE - 2) continue;
+      
+      // [LOKI FILTER] Robustness: Only use temporally stable features for ordinal constraints
+      // This prevents "flickering" or hallucinated depth from creating erroneous constraints
+      if (params.temporal_stable && !it_per_id.depth_stable) continue;
       
       double timestamp = Headers[first_frame_idx];
       auto frame_it = all_image_frame.find(timestamp);
@@ -2793,38 +3121,183 @@ void Estimator::optimization() {
               y_px >= 1 && y_px < depth_map.rows - 1) {
             float mono_inv_depth = depth_map.at<float>(y_px, x_px);
             
-            if (mono_inv_depth > 0.001f) {
-              candidates.push_back({ordinal_feature_idx, mono_inv_depth, first_frame_idx, x_px, y_px});
+            // [LOKI FILTER] Grid-Based Homogeneity
+            // Track accumulated candidates per 10x8 grid cell PER FRAME
+            static const int GRID_COLS = 10;
+            static const int GRID_ROWS = 8;
+            static std::map<double, std::vector<int>> frame_grid_counts;
+            
+            // Clear map at the start of a new optimization pass (detected by empty candidates? 
+            // Better: Clear it when candidates is empty at start of loop, but we are inside loop now.
+            // Actually, simply using a static map with a "current reset time" check for the whole function?
+            // Safer: Just make it static and clear it if we detect a new optimization call? 
+            // No, optimization is called frequently.
+            // Let's use a STATIC map, but clear it if candidates.empty() (Start of collection).
+            // Wait, we are inside the 'candidates' vector population loop.
+            // We can't see the start of the function.
+            // BUT, look at line 3023: "candidates collected". We are collecting.
+            
+            // Alternative: Just use the timestamp map. Clear old timestamps?
+            // Simplest: `frame_grid_counts[timestamp]` creates a new vector if needed.
+            // But we need to clear it sometime.
+            
+            // Hack/Fix: Since we don't control the outer loop scope here, let's use a
+            // static double last_opt_time = -1; 
+            // But header changes.
+            
+            // BETTER: Moving the map declaration OUTSIDE the loop? I can't seeing the snippet.
+            // I will use `if (candidates.empty()) frame_grid_counts.clear();` 
+            // checking `candidates.empty()` at the VERY START of this `if` block (before push_back).
+            // But this block runs for every feature. `candidates` is not empty after the first one.
+            
+            // OK, I will assume the `candidates` vector is defined locally in `optimization()` before the feature loop.
+            // If so, I really should define the map there too.
+            // Since I can't move the definition easily without seeing the parent scope...
+            // I will implement a "Time Window" clear.
+            // `frame_grid_counts` will hold data. We periodically prune it? 
+            // Or just clear it if `candidates.size() == 0`?
+            // YES. `candidates` is local vector, empty at start of `optimization()`.
+            // So on the FIRST valid feature, `candidates` is empty.
+            if (candidates.empty()) {
+                frame_grid_counts.clear();
+            }
+
+            int grid_x = (x_px * GRID_COLS) / depth_map.cols;
+            int grid_y = (y_px * GRID_ROWS) / depth_map.rows;
+            grid_x = std::min(grid_x, GRID_COLS - 1); 
+            grid_y = std::min(grid_y, GRID_ROWS - 1);
+            int cell_idx = grid_y * GRID_COLS + grid_x;
+            
+            // Ensure vector exists
+            if (frame_grid_counts.find(timestamp) == frame_grid_counts.end()) {
+                frame_grid_counts[timestamp].resize(GRID_COLS * GRID_ROWS, 0);
+            }
+            std::vector<int>& counts = frame_grid_counts[timestamp];
+
+            // [LOKI PARAM] Grid Filter Enable
+            if (params.ordinal_grid_enable) {
+                if (counts[cell_idx] >= 4) continue; 
+            }
+
+            // [LOKI PARAM] Max Depth Check
+            double min_inv_depth = 1.0 / params.ordinal_depth_max_metric;
+            
+            if (mono_inv_depth > min_inv_depth) {
+                double current_vio_inv_depth = (it_per_id.estimated_depth > 0) ? (1.0 / it_per_id.estimated_depth) : 0.0;
+                candidates.push_back({ordinal_feature_idx, mono_inv_depth, current_vio_inv_depth, first_frame_idx, x_px, y_px, &it_per_id});
+                if (params.ordinal_grid_enable) counts[cell_idx]++;
             }
           }
         }
       }
     }
+    if (params.ordinal_grid_enable)
+        printf("[Ordinal] Candidates collected: %lu (Grid Active)\n", candidates.size());
+    else
+        printf("[Ordinal] Candidates collected: %lu (Grid Disabled)\n", candidates.size());
     
     // Generate ordinal pairs: features in same frame with significant depth difference
     std::vector<OrdinalPair> ordinal_pairs;
     ordinal_pairs.reserve(params.ordinal_depth_max_pairs);
+    
+    // [LOKI DEBUG] Per-iteration Filter Stats
+    int iter_checks = 0;
+    int iter_pass = 0;
     
     for (size_t i = 0; i < candidates.size() && ordinal_pairs.size() < static_cast<size_t>(params.ordinal_depth_max_pairs); i++) {
       for (size_t j = i + 1; j < candidates.size() && ordinal_pairs.size() < static_cast<size_t>(params.ordinal_depth_max_pairs); j++) {
         // Only pair features from the same frame
         if (candidates[i].frame_idx != candidates[j].frame_idx) continue;
         
+        // [LOKI FILTER] Max Spatial Distance Check
+        // Only compare features within a local neighborhood to avoid global scale drift issues
+        double dx = candidates[i].pixel_x - candidates[j].pixel_x;
+        double dy = candidates[i].pixel_y - candidates[j].pixel_y;
+        double dist_sq = dx*dx + dy*dy;
+        
+        // [LOKI FILTER] Temporal Consistency Filter (Proposal B)
+        // Verify that the relative ordering (Sign of Depth Difference) is consistent across time.
+        if (params.ordinal_temporal_consistency && candidates[i].feature_ptr && candidates[j].feature_ptr) {
+             const FeaturePerId* fA = candidates[i].feature_ptr;
+             const FeaturePerId* fB = candidates[j].feature_ptr;
+             double current_diff_sign = (candidates[i].mono_inv_depth - candidates[j].mono_inv_depth);
+             
+             int consistent_frames = 0;
+             int inconsistent_frames = 0;
+             
+             // Check all frames in window
+             for (int k = 0; k < WINDOW_SIZE; k++) {
+                 if (k == candidates[i].frame_idx) continue; // Skip current
+                 
+                 // Check if both features exist in frame k
+                 int idxA = k - fA->start_frame;
+                 int idxB = k - fB->start_frame;
+                 
+                 if (idxA >= 0 && idxA < (int)fA->feature_per_frame.size() &&
+                     idxB >= 0 && idxB < (int)fB->feature_per_frame.size()) {
+                         
+                      // Both observed. Look up Depth Map.
+                      double header = Headers[k];
+                      if (all_image_frame.count(header) && !all_image_frame[header].depth_map.empty()) {
+                          const cv::Mat& hist_depth = all_image_frame[header].depth_map;
+                          
+                          // Get Pixel Coords (Stored in uv.x, uv.y)
+                          int uA = (int)fA->feature_per_frame[idxA].uv.x();
+                          int vA = (int)fA->feature_per_frame[idxA].uv.y();
+                          int uB = (int)fB->feature_per_frame[idxB].uv.x();
+                          int vB = (int)fB->feature_per_frame[idxB].uv.y();
+                          
+                          // Bounds check
+                          if (uA >= 0 && uA < hist_depth.cols && vA >= 0 && vA < hist_depth.rows &&
+                              uB >= 0 && uB < hist_depth.cols && vB >= 0 && vB < hist_depth.rows) {
+                                  
+                               float dA = hist_depth.at<float>(vA, uA);
+                               float dB = hist_depth.at<float>(vB, uB);
+                               
+                               double hist_diff = dA - dB;
+                               double max_d = std::max(dA, dB);
+                               
+                               // Only judge if significant difference (to avoid noise flipping small deltas)
+                               if (std::abs(hist_diff) > max_d * params.ordinal_depth_margin) {
+                                   if (hist_diff * current_diff_sign > 0) consistent_frames++;
+                                   else inconsistent_frames++;
+                               }
+                          }
+                      }
+                 }
+             }
+             
+             // [LOKI DEBUG] Stat Tracking
+             iter_checks++;
+
+             // Decision Gate
+             if (inconsistent_frames > 0) continue; // VETO
+             if (consistent_frames < params.ordinal_consistency_min_frames) continue; // IGNORE
+             
+             iter_pass++;
+        }
+
+        if (dist_sq > params.ordinal_depth_max_dist * params.ordinal_depth_max_dist) continue;
+        
         double diff = candidates[i].mono_inv_depth - candidates[j].mono_inv_depth;
         double abs_diff = std::abs(diff);
         
-        // Only create constraint if depth difference is significant
+        double max_inv_depth = std::max(candidates[i].mono_inv_depth, candidates[j].mono_inv_depth);
+        
+        // Only create constraint if depth difference is significant (relative percentage)
         // (avoid constraining features at similar depths)
-        if (abs_diff > 0.05) {  // Significant inv-depth difference
+        if (abs_diff > max_inv_depth * params.ordinal_depth_margin) {  // Significant relative difference
           OrdinalPair pair;
           if (diff > 0) {
             // i is closer (higher inv-depth)
             pair.feature_idx_closer = candidates[i].feature_index;
             pair.feature_idx_farther = candidates[j].feature_index;
+            pair.inv_depth_closer = candidates[i].mono_inv_depth; // [LOKI] Store for adaptive margin
           } else {
             // j is closer
             pair.feature_idx_closer = candidates[j].feature_index;
             pair.feature_idx_farther = candidates[i].feature_index;
+            pair.inv_depth_closer = candidates[j].mono_inv_depth; // [LOKI] Store for adaptive margin
           }
           pair.inv_depth_diff = abs_diff;
           ordinal_pairs.push_back(pair);
@@ -2840,21 +3313,123 @@ void Estimator::optimization() {
     
     // Add ordinal constraints (limit to max_pairs)
     int pairs_to_add = std::min(static_cast<int>(ordinal_pairs.size()), params.ordinal_depth_max_pairs);
+    
     for (int i = 0; i < pairs_to_add; i++) {
-      const auto& pair = ordinal_pairs[i];
-      
-      ceres::CostFunction* cost_function = 
-          OrdinalDepthFactor::Create(params.ordinal_depth_margin, params.ordinal_depth_weight);
-      problem.AddResidualBlock(cost_function,
+        const auto& pair = ordinal_pairs[i];
+        
+        // [LOKI ADAPTIVE MARGIN]
+        // Scale margin by inverse depth (Parallax Sensitivity).
+        // If inv_depth = 1.0 (Close), margin = 0.05.
+        // If inv_depth = 0.01 (Far), margin = 0.0005.
+        // We clamp at min_margin = 0.01 to ensure some separation.
+        // ORDINAL FIX HERE AMK
+        //double adaptive_margin = pair.inv_depth_closer * params.ordinal_depth_margin;
+        //daptive_margin = std::max(0.01, adaptive_margin); // Hard floor
+        
+        double adaptive_margin = 0.01;
+        ceres::CostFunction* cost_function = 
+          OrdinalDepthFactor::Create(adaptive_margin, params.ordinal_depth_weight);
+      ceres::ResidualBlockId block_id = problem.AddResidualBlock(cost_function,
                                nullptr,  // No loss function - soft hinge built into factor
                                para_Feature[pair.feature_idx_closer],
                                para_Feature[pair.feature_idx_farther]);
+      // [COMMENTED OUT FOR PERFORMANCE]
+      // diag.ordinal_block_ids.push_back(block_id);
       added_ordinal_factors++;
+      // diag.num_ordinal_factors++;
+      // diag.total_ordinal_residuals++;
+      // Note: Ordinal factors connect 2 features, so cost tracking is complex. Skipping per-feature assignment.
     }
     
+    // [LOKI DEBUG] Print Filter Stats
+    if (params.ordinal_temporal_consistency && iter_checks > 0) {
+        printf("[Temporal Filter] Checked %d pairs. Passed: %d (%.1f%%). Logic: %d+ frames.\n", 
+            iter_checks, iter_pass, 100.0*iter_pass/iter_checks, params.ordinal_consistency_min_frames);
+    }
+
     if (added_ordinal_factors > 0) {
-      printf("\033[1;35m[Ordinal Depth] Added %d ordinal constraints (margin=%.3f, w=%.2f)\033[0m\n",
-             added_ordinal_factors, params.ordinal_depth_margin, params.ordinal_depth_weight);
+      // [LOKI DEBUG] Visualization
+      // Algorithm: Find the frame with the MOST ordinal pairs to visualize
+      std::map<int, int> pairs_per_frame;
+      std::unordered_map<int, int> feature_to_frame;
+      
+      // Build lookup
+      for (const auto& cand : candidates) {
+          feature_to_frame[cand.feature_index] = cand.frame_idx;
+      }
+      
+      // Count pairs
+      // [LOKI FIX] Only visualize the pairs that were ACTUALLY added to the solver
+      std::vector<OrdinalPair> visual_pairs;
+      visual_pairs.reserve(pairs_to_add);
+      for (int i=0; i<pairs_to_add; i++) visual_pairs.push_back(ordinal_pairs[i]);
+      
+      for (const auto& pair : visual_pairs) {
+          int f_idx = feature_to_frame[pair.feature_idx_closer]; // Both features are in same frame
+          pairs_per_frame[f_idx]++;
+      }
+      
+      // Find best frame
+      int best_frame_idx = -1;
+      int max_pairs = 0;
+      for (auto const& [frame_idx, count] : pairs_per_frame) {
+          if (count > max_pairs) {
+              max_pairs = count;
+              best_frame_idx = frame_idx;
+          }
+      }
+      
+      // Fallback if no pairs found (shouldn't happen if added > 0)
+      if (best_frame_idx == -1) best_frame_idx = WINDOW_SIZE - 2;
+
+      int debug_frame_idx = best_frame_idx;
+      double debug_header = Headers[debug_frame_idx];
+      
+      // printf("[Ordinal Vis] Selected Best Frame: %d (%.6f) with %d pairs\n", debug_frame_idx, debug_header, max_pairs);
+      
+      // printf("[Ordinal Vis] Target Frame: %.6f. In Cache? %d\n", debug_header, (int)all_image_frame.count(debug_header));
+      
+      if (all_image_frame.count(debug_header)) {
+       
+          const cv::Mat& debug_img = all_image_frame[debug_header].raw_image;
+          
+          if (!debug_img.empty()) {
+              std::vector<OrdinalCandidate> debug_candidates;
+              std::vector<OrdinalPair> debug_pairs;
+              std::unordered_set<int> valid_feat_indices;
+              
+              // Filter candidates for this frame
+              for (const auto& cand : candidates) {
+                  if (cand.frame_idx == debug_frame_idx) {
+                      debug_candidates.push_back(cand);
+                      valid_feat_indices.insert(cand.feature_index);
+                  }
+              }
+              
+              // Filter pairs for this frame
+              for (const auto& pair : visual_pairs) {
+                  if (valid_feat_indices.count(pair.feature_idx_closer)) {
+                      debug_pairs.push_back(pair);
+                  }
+              }
+              
+              printf("[Ordinal Vis] Frame %.6f: Candidates %lu, Pairs %lu\n", 
+                     debug_header, debug_candidates.size(), debug_pairs.size());
+              std::cout << "Let's debug this guy, debug pairs:" << debug_pairs.size() << std::endl;
+              if (!debug_pairs.empty()) {
+                  std::cout << "Publishing ordinal pair debug image" << std::endl;
+                  pubOrdinalConstraints(*this, debug_candidates, debug_pairs, debug_img, debug_header);
+              } else {
+                  printf("[Ordinal Vis] No pairs for this specific frame (Total in window: %d)\n", added_ordinal_factors);
+              }
+          } else {
+              printf("[Ordinal Vis] Raw Image Empty for %.6f!\n", debug_header);
+          }
+      } else {
+          printf("[Ordinal Vis] Frame %.6f NOT found in all_image_frame cache!\n", debug_header);
+      }
+
+      printf("\033[1;32m[Ordinal] Added %d ordinal factors. Time: %.2f ms\033[0m\n", added_ordinal_factors, t_ordinal.toc());
     }
     ROS_INFO("[Ordinal] Time cost: %f ms", t_ordinal.toc());
   }
@@ -2862,20 +3437,43 @@ void Estimator::optimization() {
   // Debug output
   if (added_depth_factors > 0) {
     printf("\033[1;36m[Depth Opt] Added %d depth priors (s=%.3f, t=%.3f, w=%.2f, var=%.6f)\033[0m\n", 
-           added_depth_factors, cached_scale, cached_shift, WEIGHT, cached_inv_depth_variance);
+           added_depth_factors, cached_scale, cached_shift, 
+           WEIGHT, cached_inv_depth_variance);
   }
+  
+
+  // [LOKI DEBUG] Print Aggregate Gate Stats
+  if (debug_count_total > 0) {
+      double avg_var = debug_sum_var / debug_count_total;
+      double avg_gate = debug_sum_gate / debug_count_total;
+      printf("\033[1;33m[GATE SUMMARY] Features: %d | Avg Var: %.4f | Avg Gate: %.4f | Lambda: %.1f\033[0m\n", 
+             debug_count_total, avg_var, avg_gate, 1000.0);
+  }
+
   added_depth_factors = 0; //Reset for next optimization call
-  std::cout << "Feature count per frame: ";
-  for (int i = 0; i <= WINDOW_SIZE; i++) {
-      std::cout << numbers[i] << (i == WINDOW_SIZE ? "\n" : ", ");
-      numbers[i] = 0; // Reset for next loop
+  if (params.diagnostics) {
+      std::cout << "Feature count per frame: ";
+      for (int i = 0; i <= WINDOW_SIZE; i++) {
+          std::cout << numbers[i] << (i == WINDOW_SIZE ? "\n" : ", ");
+          numbers[i] = 0; // Reset for next loop
+      }
+  } else {
+      for (int i = 0; i <= WINDOW_SIZE; i++) numbers[i] = 0;
   }
 
   // [COMMENTED OUT FOR PERFORMANCE] Print factor diagnostics BEFORE solving
-  // diag.print();
+  if (params.diagnostics) {
+    // diag.print();
+  }
+  
+  // [COMMENTED OUT FOR PERFORMANCE] Store pointer to para_Feature for per-feature analysis
   // diag.para_Feature_ptr = para_Feature;
-  // diag.evaluateInitialCosts(problem);
-  // diag.evaluatePerFeatureCosts(problem, true);
+  
+  // [COMMENTED OUT FOR PERFORMANCE] Evaluate per-group costs BEFORE optimization
+  if (params.diagnostics) {
+    // diag.evaluateInitialCosts(problem);
+    // diag.evaluatePerFeatureCosts(problem, true);
+  }
 
   ROS_DEBUG("visual measurement count: %d", f_m_cnt);
   // printf("prepare for ceres: %f \n", t_prepare.toc());
@@ -2917,25 +3515,59 @@ void Estimator::optimization() {
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
   
-  // [COMMENTED OUT FOR PERFORMANCE] Diagnostics evaluation
-  // diag.evaluateFinalCosts(problem);
-  // diag.evaluatePerFeatureCosts(problem, false);
-  // diag.checkForAnomaly(inputImageCnt);
+  // Evaluate per-group costs AFTER optimization
+  // [LOKI OPTIM: Re-enabled]
+  // [LOKI OPTIM: Re-enabled diagnostics per user request]
+  //if (params.diagnostics) {
+  //  diag.evaluateFinalCosts(problem);
+  //  diag.evaluatePerFeatureCosts(problem, false); // Per-feature costs (final)
+  //}
+  
+  // Check for anomalies and print detailed debug info if detected
+  //if (params.diagnostics) {
+  //  diag.checkForAnomaly(inputImageCnt);
+  //}
 
-  // [COMMENTED OUT FOR PERFORMANCE] Enhanced solver diagnostics
-  // printf("\n");
-  // printf("╔═══════════════════════════════════════════════════════════════╗\n");
-  // printf("║              CERES OPTIMIZATION RESULTS                       ║\n");
-  // ... (large diagnostic print block removed for performance)
-  // diag.printCostBreakdown();
-  // diag.exportToCSV("/datasets/optimization_dump.csv", ...);
-
-  ROS_INFO("Solver Time: %.2fms | Cost: %.2e -> %.2e | Iter: %d", 
-           summary.total_time_in_seconds * 1000.0,
-           summary.initial_cost,
-           summary.final_cost,
+  // Enhanced solver diagnostics
+  if (params.diagnostics) {
+    printf("\n");
+    printf("╔═══════════════════════════════════════════════════════════════╗\n");
+    printf("║              CERES OPTIMIZATION RESULTS                       ║\n");
+    printf("╠═══════════════════════════════════════════════════════════════╣\n");
+    printf("║ Solver Time:          %10.2f ms                           ║\n", 
+           summary.total_time_in_seconds * 1000.0);
+    printf("║ Iterations:           %10d                              ║\n", 
            (int)summary.iterations.size());
-  cout << summary.BriefReport() << endl;
+    printf("║ Initial Cost:         %10.4e                           ║\n", 
+           summary.initial_cost);
+    printf("║ Final Cost:           %10.4e                           ║\n", 
+           summary.final_cost);
+    printf("║ Cost Change:          %10.4e (%.2f%%)                  ║\n", 
+           summary.initial_cost - summary.final_cost,
+           (summary.initial_cost > 1e-10) ? 
+             100.0 * (summary.initial_cost - summary.final_cost) / summary.initial_cost : 0.0);
+    printf("║ Termination:          %s                  ║\n", 
+           ceres::TerminationTypeToString(summary.termination_type));
+    printf("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    // [COMMENTED OUT FOR PERFORMANCE] Print per-group cost breakdown
+    // diag.printCostBreakdown();
+    
+    // [COMMENTED OUT FOR PERFORMANCE] Export to CSV for later visualization
+    // diag.exportToCSV("/datasets/optimization_dump.csv",
+    //                  Headers[frame_count],  // timestamp of latest frame in window
+    //                  inputImageCnt,         // frame id
+    //                  summary.total_time_in_seconds * 1000.0,
+    //                  (int)summary.iterations.size(),
+    //                  ceres::TerminationTypeToString(summary.termination_type));
+
+    ROS_INFO("Solver Time: %.2fms | Cost: %.2e -> %.2e | Iter: %d", 
+             summary.total_time_in_seconds * 1000.0,
+             summary.initial_cost,
+             summary.final_cost,
+             (int)summary.iterations.size());
+    cout << summary.BriefReport() << endl;
+  }
   ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
   // printf("solver costs: %f \n", t_solver.toc());
 
@@ -3000,7 +3632,13 @@ void Estimator::optimization() {
       numbers[first_frame_idx]++;
       }
 
-      for (auto &it_per_id : f_manager.feature) {
+      // [LOKI DEBUG] Aggregate Stats for Variance Gate
+    double debug_sum_var = 0.0;
+    double debug_sum_gate = 0.0;
+    int debug_count_total = 0;
+    int debug_count_rejected = 0;
+
+    for (auto &it_per_id : f_manager.feature) {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
         if (it_per_id.used_num < 4) continue;
         
@@ -3153,9 +3791,14 @@ void Estimator::optimization() {
       last_marginalization_parameter_blocks = parameter_blocks;
     }
   }
-  // printf("whole marginalization costs: %f \n",
-  // t_whole_marginalization.toc()); printf("whole time for ceres: %f \n",
-  // t_whole.toc());
+  // printf("whole marginalization costs: %f \n", t_whole_marginalization.toc());
+  // printf("whole time for ceres: %f \n", t_whole.toc());
+  
+  if (true) {
+    std::cout << "@O@ Optimization time: " << t_whole.toc() << " ms" << std::endl;
+    printf("\033[1;36m[OPT PROFILE] Setup: %.2f | Prep: %.2f | Solve: %.2f | Marg: %.2f | TOTAL: %.2f ms\033[0m\n",
+           t_setup_cost, t_prep_cost, summary.total_time_in_seconds * 1000.0, t_whole_marginalization.toc(), t_whole.toc());
+  }
 }
 
 void Estimator::slideWindow() {

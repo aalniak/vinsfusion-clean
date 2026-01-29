@@ -51,6 +51,14 @@ void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q,
 void pubTrackImage(const cv::Mat &imgTrack, const double t);
 void pubDepthTrackImage(const cv::Mat &depthTrack, const double t);
 
+// [LOKI DEBUG] Visualize Ordinal Constraints (Green=Good, Red=Bad)
+// [LOKI DEBUG] Visualize Ordinal Constraints (Green=Good, Red=Bad)
+void pubOrdinalConstraints(const Estimator &estimator,
+                          const std::vector<Estimator::OrdinalCandidate>& candidates, 
+                          const std::vector<Estimator::OrdinalPair>& pairs,
+                          const cv::Mat& image, 
+                          double header);
+
 void printStatistics(const Estimator &estimator, double t);
 
 void pubOdometry(const Estimator &estimator, const std_msgs::Header &header);

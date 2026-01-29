@@ -64,13 +64,6 @@ struct OrdinalDepthFactor
     }
 };
 
-/**
- * Utility struct to track ordinal depth pairs for a frame
- */
-struct OrdinalPair {
-    int feature_idx_closer;   // Index in para_Feature of closer feature
-    int feature_idx_farther;  // Index in para_Feature of farther feature
-    double inv_depth_diff;    // Difference in mono inv-depth (for sorting by confidence)
-};
+
 
 }  // namespace vins::estimator

@@ -182,6 +182,26 @@ void Parameters::read_from_file(const std::string &config_file) {
   fsSettings["depth_engine_path"] >> depth_engine_path;
   save_image = fsSettings["save_image"];
   load_previous_pose_graph = fsSettings["load_previous_pose_graph"];
+  
+  // [VIDEO_DEPTH]
+  if (fsSettings["video_mode"].empty()) {
+      video_mode = 0;
+  } else {
+      fsSettings["video_mode"] >> video_mode;
+  }
+  
+  if (fsSettings["video_depth_engine_path"].empty()) {
+      video_depth_engine_path = "";
+  } else {
+      fsSettings["video_depth_engine_path"] >> video_depth_engine_path;
+  }
+  
+  if (fsSettings["gating"].empty()) {
+      gating = 1; 
+  } else {
+      fsSettings["gating"] >> gating;
+  }
+
 
   char *env_terminate_t_str = getenv("VINS_TERMINATE_TIME");
   if (env_terminate_t_str != nullptr) {
@@ -358,7 +378,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   }
   
   if (fsSettings["ordinal_depth_margin"].empty()) {
-    ordinal_depth_margin = 0.01;  // Default: 0.01 inv-depth margin
+    ordinal_depth_margin = 0.05;  // Default: 5% relative margin
   } else {
     fsSettings["ordinal_depth_margin"] >> ordinal_depth_margin;
   }
@@ -374,12 +394,114 @@ void Parameters::read_from_file(const std::string &config_file) {
   } else {
     fsSettings["ordinal_depth_max_pairs"] >> ordinal_depth_max_pairs;
   }
+
+  if (fsSettings["ordinal_depth_max_dist"].empty()) {
+    ordinal_depth_max_dist = 150.0;  // Default: 150 pixels max distance
+  } else {
+    fsSettings["ordinal_depth_max_dist"] >> ordinal_depth_max_dist;
+  }
   
+  // [LOKI] New parameters
+  if (fsSettings["ordinal_depth_max_metric"].empty()) {
+      ordinal_depth_max_metric = 50.0; // Default: 50 meters
+  } else {
+      fsSettings["ordinal_depth_max_metric"] >> ordinal_depth_max_metric;
+  }
+  
+  if (fsSettings["ordinal_grid_enable"].empty()) {
+      ordinal_grid_enable = 1; // Default: Enabled
+  } else {
+      fsSettings["ordinal_grid_enable"] >> ordinal_grid_enable;
+  }
+  
+  if (fsSettings["save_ordinal_debug"].empty()) {
+      save_ordinal_debug = 0; // Default: Disabled
+  } else {
+      fsSettings["save_ordinal_debug"] >> save_ordinal_debug;
+  }
+
+  // [LOKI] Ordinal Temporal Consistency
+  if (fsSettings["ordinal_temporal_consistency"].empty()) {
+      ordinal_temporal_consistency = 0; // Default OFF
+  } else {
+      fsSettings["ordinal_temporal_consistency"] >> ordinal_temporal_consistency;
+  }
+
+  if (fsSettings["ordinal_consistency_min_frames"].empty()) {
+      ordinal_consistency_min_frames = 1; // Default 1 common frame
+  } else {
+      fsSettings["ordinal_consistency_min_frames"] >> ordinal_consistency_min_frames;
+  }
+
   if (ordinal_depth) {
-    ROS_INFO("\033[1;32m[DEPTH] Ordinal depth constraints ENABLED: margin=%.4f, weight=%.2f, max_pairs=%d\033[0m",
-             ordinal_depth_margin, ordinal_depth_weight, ordinal_depth_max_pairs);
+    ROS_INFO("\033[1;32m[DEPTH] Ordinal: MetricMax=%.1fm, Grid=%d, SaveImg=%d\033[0m",
+             ordinal_depth_max_metric, ordinal_grid_enable, save_ordinal_debug);
   } else {
     ROS_INFO("\033[1;33m[DEPTH] Ordinal depth constraints DISABLED\033[0m");
+  }
+
+  // Multi-view depth fusion parameters
+  if (fsSettings["mv_depth_fusion"].empty()) {
+    mv_depth_fusion = 0;  // Default: disabled
+  } else {
+    fsSettings["mv_depth_fusion"] >> mv_depth_fusion;
+  }
+  
+  if (fsSettings["mv_depth_min_views"].empty()) {
+    mv_depth_min_views = 3;  // Default: 3 viewpoints
+  } else {
+    fsSettings["mv_depth_min_views"] >> mv_depth_min_views;
+  }
+  
+  if (fsSettings["mv_depth_fusion_weight"].empty()) {
+    mv_depth_fusion_weight = 1.0;  // Default: 1.0
+  } else {
+    fsSettings["mv_depth_fusion_weight"] >> mv_depth_fusion_weight;
+  }
+  
+  if (mv_depth_fusion) {
+    ROS_INFO("\033[1;32m[DEPTH] Multi-view depth fusion ENABLED: min_views=%d, weight=%.2f\033[0m",
+             mv_depth_min_views, mv_depth_fusion_weight);
+  } else {
+    ROS_INFO("\033[1;33m[DEPTH] Multi-view depth fusion DISABLED\033[0m");
+  }
+
+  // Photometric regularization parameters
+  if (fsSettings["photometric_reg"].empty()) {
+    photometric_reg = 0;  // Default: disabled
+  } else {
+    fsSettings["photometric_reg"] >> photometric_reg;
+  }
+  
+  if (fsSettings["photometric_weight"].empty()) {
+    photometric_weight = 0.1;  // Default: 0.1
+  } else {
+    fsSettings["photometric_weight"] >> photometric_weight;
+  }
+  
+  if (fsSettings["photometric_keyframe_gap"].empty()) {
+    photometric_keyframe_gap = 2;  // Default: 2 frames
+  } else {
+    fsSettings["photometric_keyframe_gap"] >> photometric_keyframe_gap;
+  }
+  
+  if (fsSettings["photometric_ssim_weight"].empty()) {
+    photometric_ssim_weight = 0.85;  // Default: 0.85
+  } else {
+    fsSettings["photometric_ssim_weight"] >> photometric_ssim_weight;
+  }
+  
+  if (fsSettings["photometric_l1_weight"].empty()) {
+    photometric_l1_weight = 0.15;  // Default: 0.15
+  } else {
+    fsSettings["photometric_l1_weight"] >> photometric_l1_weight;
+  }
+  
+  if (photometric_reg) {
+    ROS_INFO("\033[1;32m[DEPTH] Photometric regularization ENABLED: weight=%.2f, gap=%d, ssim=%.2f, l1=%.2f\033[0m",
+             photometric_weight, photometric_keyframe_gap, photometric_ssim_weight, photometric_l1_weight);
+  } else {
+    ROS_INFO("\033[1;33m[DEPTH] Photometric regularization DISABLED\033[0m");
   }
 
   if (fsSettings["tapnext_onnx_path"].empty()) {
@@ -461,6 +583,12 @@ void Parameters::read_from_file(const std::string &config_file) {
         tapnext_reset_max_frames = 100;
     } else {
         fsSettings["tapnext_reset_max_frames"] >> tapnext_reset_max_frames;
+    }
+
+    if (fsSettings["diagnostics"].empty()) {
+        diagnostics = 0;
+    } else {
+        fsSettings["diagnostics"] >> diagnostics;
     }
 
   fsSettings.release();

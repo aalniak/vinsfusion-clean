@@ -9,6 +9,12 @@
  *******************************************************/
 
 #include <vins_estimator/utility/visualization.h>
+#include <vins_estimator/estimator/parameters.h> 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <unordered_set>
 
 namespace vins::estimator {
 
@@ -415,6 +421,153 @@ void pubKeyframe(const Estimator &estimator) {
     }
     pub_keyframe_point.publish(point_cloud);
   }
+}
+
+// [LOKI DEBUG] Visualization of Ordinal Constraints
+ros::Publisher pub_ordinal_debug;
+
+void pubOrdinalConstraints(const Estimator &estimator,
+                           const std::vector<Estimator::OrdinalCandidate>& candidates, 
+                           const std::vector<Estimator::OrdinalPair>& pairs,
+                           const cv::Mat& image, 
+                           double header) {
+    if (pub_ordinal_debug.getTopic().empty()) {
+       ros::NodeHandle n("~");
+       pub_ordinal_debug = n.advertise<sensor_msgs::Image>("ordinal_debug_image", 100);
+    }
+
+    if (pub_ordinal_debug.getNumSubscribers() == 0 && !estimator.params.save_ordinal_debug) return; // Quick exit
+
+    if (image.empty() || pairs.empty()) return;
+
+    cv::Mat debug_img;
+    if (image.channels() == 1) {
+        cv::cvtColor(image, debug_img, cv::COLOR_GRAY2BGR);
+    } else {
+        image.copyTo(debug_img);
+    }
+
+    // Map feature_index -> Candidate for fast lookup
+    std::unordered_map<int, const Estimator::OrdinalCandidate*> candidate_map;
+    for (const auto& cand : candidates) {
+        candidate_map[cand.feature_index] = &cand;
+    }
+
+    int violated_count = 0;
+    int satisfied_count = 0;
+
+    std::unordered_set<int> visited_features;
+
+    for (const auto& pair : pairs) {
+        // [LOKI CLEANUP] Visualization Clutter Reduction
+        // Filter: Ensure each feature is used in only ONE connection for display
+        if (visited_features.count(pair.feature_idx_closer) || visited_features.count(pair.feature_idx_farther)) {
+            continue; 
+        }
+
+        if (candidate_map.count(pair.feature_idx_closer) && candidate_map.count(pair.feature_idx_farther)) {
+            const auto* c_closer = candidate_map[pair.feature_idx_closer];
+            const auto* c_farther = candidate_map[pair.feature_idx_farther];
+
+            // Mark features as visited
+            visited_features.insert(pair.feature_idx_closer);
+            visited_features.insert(pair.feature_idx_farther);
+
+            cv::Point p1(c_closer->pixel_x, c_closer->pixel_y);
+            cv::Point p2(c_farther->pixel_x, c_farther->pixel_y);
+
+            // Check Simple Consistency (Is Closer actually Closer?)
+            // Note: Adaptive margin is handled in optimizer, here we visualize raw ordering
+            // [LOKI FIX] Use VIO State (vio_inv_depth) to check against the Network's intended order
+            // The constraint exists because Network said Closer > Farther.
+            // So we check if VIO agrees.
+            bool is_consistent = (c_closer->vio_inv_depth > c_farther->vio_inv_depth);
+
+            cv::Scalar color = is_consistent ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255); // Green vs Red
+            int thickness = is_consistent ? 1 : 2;
+
+            if (!is_consistent) violated_count++;
+            else satisfied_count++;
+
+            cv::line(debug_img, p1, p2, color, thickness);
+            cv::circle(debug_img, p1, 3, cv::Scalar(255, 0, 0), -1); // Blue = Closer Node (Expected High InvDepth)
+            cv::circle(debug_img, p2, 3, cv::Scalar(0, 0, 255), -1); // Red = Farther Node (Expected Low InvDepth)
+        }
+    }
+    
+    // Draw Stats Overlay
+    std::string stats = "Total: " + std::to_string(pairs.size()) + 
+                        " | Violated: " + std::to_string(violated_count) +
+                        " | Satisfied: " + std::to_string(satisfied_count);
+    
+    cv::putText(debug_img, stats, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 255), 2);
+
+    // [LOKI DEBUG] Save to file for video creation
+    // [LOKI DEBUG] Async Save to file
+    // Check if saving is enabled in params
+    if (estimator.params.save_ordinal_debug) {
+        // Hardcoded path to ensure visibility on SSD
+        static const std::string save_dir = "/datasets/ordinal_debug/";
+        static bool dir_created = false;
+        
+        // Async Worker Globals (Static within function scope or file scope? File scope is safer for thread life)
+        // Actually, local statics work fine for singletons.
+        static std::queue<std::pair<std::string, cv::Mat>> save_queue;
+        static std::mutex queue_mutex;
+        static std::condition_variable queue_cv;
+        static bool writer_active = false;
+        static std::thread writer_thread;
+    
+        if (!dir_created) {
+            std::string cmd = "mkdir -p " + save_dir;
+            int ret = system(cmd.c_str());
+            (void)ret; 
+            dir_created = true;
+            
+            // Start the worker thread exactly once
+            if (!writer_active) {
+                writer_active = true;
+                writer_thread = std::thread([]() {
+                    while (true) { // Runs until process death (OK for ROS node)
+                        std::pair<std::string, cv::Mat> task;
+                        {
+                            std::unique_lock<std::mutex> lock(queue_mutex);
+                            queue_cv.wait(lock, []{ return !save_queue.empty(); });
+                            task = save_queue.front();
+                            save_queue.pop();
+                        }
+                        if (!task.second.empty()) {
+                            // std::cout << "[AsyncWriter] Saving " << task.first << std::endl;
+                            cv::imwrite(task.first, task.second);
+                        }
+                    }
+                });
+                writer_thread.detach(); // Let it run independently
+            }
+        }
+        
+        // Format timestamp for filename with ZERO PADDING for correct sorting
+        // std::ostringstream ss;
+        // ss << std::fixed << std::setprecision(9) << header;
+        
+        char name_buf[64];
+        // %020.9f ensures consistent length (10 digits left of decimal, 9 right)
+        // Example: 0000000100.123456789.png
+        snprintf(name_buf, sizeof(name_buf), "%020.9f", header);
+        
+        std::string filename = save_dir + std::string(name_buf) + ".png";
+        
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            // Important: Clone the image because the original mat might be reused/released by the main thread
+            save_queue.push({filename, debug_img.clone()});
+        }
+        queue_cv.notify_one();
+    }
+
+    sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", debug_img).toImageMsg();
+    msg->header.stamp = ros::Time(header);
+    pub_ordinal_debug.publish(msg);
 }
 
 }  // namespace vins::estimator

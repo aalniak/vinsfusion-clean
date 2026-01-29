@@ -122,6 +122,7 @@ add_executable(
   vins_node
   src/node/node_ros.cpp
   src/vins_estimator/estimator/DepthInfer.cpp
+  src/vins_estimator/estimator/DepthInferVideo.cpp
   #src/vins_estimator/estimator/AsyncPoseSolver.cpp
   src/vins_estimator/estimator/parameters.cpp
   src/vins_estimator/estimator/estimator.cpp

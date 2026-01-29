@@ -30,6 +30,7 @@
 #include <vins_estimator/utility/tic_toc.h>
 #include <vins_estimator/utility/utility.h>
 #include "vins_estimator/estimator/DepthInfer.h"
+#include "vins_estimator/estimator/DepthInferVideo.h"
 #include "vins_estimator/estimator/SplgInference.h"
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
@@ -42,6 +43,24 @@ namespace vins::estimator {
 
 class Estimator {
  public:
+  // [LOKI] Struct for Ordinal Depth candidates (Moved from local scope for visualization)
+  struct OrdinalCandidate {
+      int feature_index;
+      double mono_inv_depth; // Network Prediction (The Constraint)
+      double vio_inv_depth;  // Current VIO State (The Reality)
+      int frame_idx;
+      int pixel_x, pixel_y;
+      const FeaturePerId* feature_ptr; // [LOKI] Pointer to feature data for history lookup
+  };
+
+  // [LOKI] Struct for Ordinal Depth pairs (Moved from ordinalDepthFactor.h)
+  struct OrdinalPair {
+      int feature_idx_closer;   // Index in para_Feature of closer feature
+      int feature_idx_farther;  // Index in para_Feature of farther feature
+      double inv_depth_diff;    // Difference in mono inv-depth (for sorting by confidence)
+      double inv_depth_closer;  // Absolute inv-depth of the closer feature (for adaptive margin)
+  };
+
   explicit Estimator(Parameters &params);
   ~Estimator();
   void setParameter();
@@ -97,6 +116,7 @@ class Estimator {
 
   enum MarginalizationFlag { MARGIN_OLD = 0, MARGIN_SECOND_NEW = 1 };
   std::shared_ptr<DepthInfer> depthInferer;
+  std::shared_ptr<DepthInferVideo> depthInfererVideo;
   std::map<double, cv::Mat> image_cache;
   std::map<double, int> frame_index_cache;  // Maps timestamp to absolute frame index
   std::mutex mCache;

@@ -42,6 +42,7 @@ class ImageFrame {
   bool is_key_frame;
   bool is_optimization_keyframe = false;
   cv::Mat depth_map;
+  cv::Mat raw_image;     // Store raw image for photometric regularization
   int frame_index = -1;  // Absolute frame index for GT depth loading
 };
 void solveGyroscopeBias(map<double, ImageFrame> &all_image_frame,
