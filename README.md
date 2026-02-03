@@ -1,3 +1,5 @@
+![This tells it all.](robots.png)
+
 # Merge to 22.04
 
 This branch is an attempt to migrate a ROS-Noetic based system onto Ubuntu 22.04, specifically on an ARM64 device (Nvidia Jetson AGX Orin series) with specifications:  
