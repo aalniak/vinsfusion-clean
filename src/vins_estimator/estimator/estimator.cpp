@@ -14,7 +14,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui.hpp> // For debug purposes.
-
+#include <opencv2/ximgproc.hpp>
 #include <cassert>
 #include <cstddef>
 
@@ -273,7 +273,9 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
                            const cv::Mat &_img1) {
   inputImageCnt++;
   std::cout << "Processing frame number " << inputImageCnt << std::endl;
-  
+  if (solver_flag == NON_LINEAR && nonlinear_input_cnt < 20)  {
+    nonlinear_input_cnt++;
+  }
   // 1. Prepare RGB image for Cache (and Inference)
   cv::Mat rgb_img;
   if (_img.channels() == 1) {
@@ -296,28 +298,38 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
   cv::Mat img_for_tracker = _img.clone(); 
 
 
-  cv::Mat depth_8u;
+
  if (depthInferer && params.rgd) {
-        
+        std::cout << "Running depth inference for frame at time " << t << std::endl;
         // --- TIMER: INFERENCE ---
         TicToc t_infer; 
-        
+        cv::Mat raw_inv_depth;
+        if (true){
         // A. Run Inference (Small Image -> Small Float Map)
-        cv::Mat raw_inv_depth = depthInferer->infer(rgb_img);
+        if (false) {
+             // SYNCHRONOUS: Use direct infer() for RGD - feature tracking can't wait
+             //raw_inv_depth = depthInfererVideo->infer(rgb_img);
+             if (raw_inv_depth.empty()) {
+                 ROS_WARN_THROTTLE(1, "[RGD] Direct infer failed for frame %.3f", t);
+             }
+        } else if (depthInferer) {
+             raw_inv_depth = depthInferer->infer(rgb_img);
+        }
+        }
         
-        
-        double time_infer = t_infer.toc();
+        // --- PROCESS DEPTH IF AVAILABLE ---
+        if (!raw_inv_depth.empty()) {
+          
+             // --- SYNC BRANCH (Stateless / GT) ---
+            double time_infer = t_infer.toc();
+             // --- TIMER: POST-PROCESSING ---
+            TicToc t_proc;
+             // Perform math operations on small float image (518x518) for efficiency
+             cv::Mat inv_depth = raw_inv_depth;  // Renamed for clarity - this IS inverse depth
 
-        // --- TIMER: POST-PROCESSING ---
-        TicToc t_proc;
-        
-        // [OPTIMIZATION A]: Math on Small Float Image (518x518)
-        cv::Mat metric_depth = raw_inv_depth;
-        //cv::divide(1.0, raw_inv_depth, metric_depth);
-
-        // --- OPTIMIZATION: STRIDED SAMPLING (Approx 0.05ms) ---
-        // We sample ~600 pixels to estimate the distribution.
-        // This avoids iterating the whole 518x518 image.
+        // Fast strided sampling for distribution estimation (~0.05ms)
+        // Sample approximately 600 pixels to estimate the distribution
+        // This avoids iterating the whole 518x518 image
         
         // Define sample size (hardcoded for speed, prevents allocation)
         // 518*518 / 431 is roughly 622 samples. 
@@ -327,8 +339,8 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         float samples[MAX_SAMPLES]; 
         
         int sample_count = 0;
-        const float* ptr = (float*)metric_depth.data;
-        const int total_pixels = metric_depth.rows * metric_depth.cols;
+        const float* ptr = (float*)inv_depth.data;
+        const int total_pixels = inv_depth.rows * inv_depth.cols;
 
         // 1. FAST GATHER
         for (int i = 0; i < total_pixels && sample_count < MAX_SAMPLES; i += STRIDE) {
@@ -351,7 +363,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
             robustMax = samples[idx_high];
         } else {
             // Fallback if image is tiny or something failed
-            cv::minMaxLoc(metric_depth, &robustMin, &robustMax);
+            cv::minMaxLoc(inv_depth, &robustMin, &robustMax);
         }
         
         // Safety clamp to prevent div by zero
@@ -359,27 +371,245 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
             robustMax = robustMin + 1.0;
         }
 
-        // --- CONVERT AND RESIZE ---
         cv::Mat depth_small_8u;
-        double scale = 255.0 / (robustMax - robustMin);
-        metric_depth.convertTo(depth_small_8u, CV_8U, scale, -robustMin * scale);
+        cv::Mat depth_8u;
+        const int num_pixels = inv_depth.rows * inv_depth.cols;
+//params.metric_depth_vis == 1
+        if (false) {
+            // --- METRIC DEPTH VISUALIZATION (Log-scaled, robust for indoor & outdoor) ---
+            // Convert inverse depth to metric depth: depth = 1 / inv_depth
+            
+            cv::Mat metric_depth(inv_depth.size(), CV_32FC1);
+            
+            // Clamp inverse depth to reasonable range before converting
+            // inv_depth ~0.005 -> depth ~200m (far outdoor)
+            // inv_depth ~5.0   -> depth ~0.2m (very close)
+            const float inv_depth_min_clamp = 0.005f;  // Max metric depth ~200m
+            const float inv_depth_max_clamp = 5.0f;    // Min metric depth ~0.2m
+            
+            // Convert to metric depth with clamping
+            const float* src_ptr = (const float*)inv_depth.data;
+            float* dst_ptr = (float*)metric_depth.data;
+            
+            for (int i = 0; i < num_pixels; i++) {
+                float inv_d = std::max(inv_depth_min_clamp, std::min(inv_depth_max_clamp, src_ptr[i]));
+                dst_ptr[i] = 1.0f / inv_d;  // Now in meters
+            }
+            
+            // --- LOGARITHMIC SCALING (Robust for indoor & outdoor) ---
+            // log(depth) compresses the range: log(0.2m)=-1.6, log(1m)=0, log(10m)=2.3, log(200m)=5.3
+            // This prevents outdoor far objects from dominating the visualization
+            cv::Mat log_depth;
+            cv::log(metric_depth + 0.1f, log_depth);  // +0.1 to avoid log(0)
+            
+            // Get robust min/max from log domain using sampled percentiles
+            float log_samples[MAX_SAMPLES];
+            const float* log_ptr = (const float*)log_depth.data;
+            for (int i = 0; i < sample_count; i++) {
+                int idx = i * STRIDE;
+                if (idx < num_pixels) log_samples[i] = log_ptr[idx];
+            }
+            
+            int log_idx_low = sample_count * 0.02;
+            int log_idx_high = sample_count * 0.98;
+            std::nth_element(log_samples, log_samples + log_idx_low, log_samples + sample_count);
+            float log_min = log_samples[log_idx_low];
+            std::nth_element(log_samples + log_idx_low + 1, log_samples + log_idx_high, log_samples + sample_count);
+            float log_max = log_samples[log_idx_high];
+            
+            if (log_max <= log_min + 0.1f) {
+                log_max = log_min + 1.0f;
+            }
+            
+            // Normalize to 0-255 (TRUE METRIC: larger depth = brighter):
+            // close objects (small metric depth -> small log) = DARK (0)
+            // far objects (large metric depth -> large log) = BRIGHT (255)
+            // Formula: output = 255 * (log_val - log_min) / (log_max - log_min)
+            double log_range = log_max - log_min;
+            double log_scale = 255.0 / log_range;
+            double log_offset = -255.0 * log_min / log_range;
+            log_depth.convertTo(depth_small_8u, CV_8U, log_scale, log_offset);
+            
+        } else {
+            // --- INVERSE DEPTH VISUALIZATION (Log-scaled for better dynamic range) ---
+            // Higher inverse depth = closer object = brighter
+            // Log scaling compresses the range, preventing close objects from dominating
+            
+            cv::Mat log_inv_depth = inv_depth;
+            //cv::log(inv_depth + 0.01f, log_inv_depth);  // +0.01 to avoid log(0)
+            
+            // Get robust min/max from log domain using sampled percentiles
+            float log_samples[MAX_SAMPLES];
+            const float* log_ptr = (const float*)log_inv_depth.data;
+            for (int i = 0; i < sample_count; i++) {
+                int idx = i * STRIDE;
+                if (idx < num_pixels) log_samples[i] = log_ptr[idx];
+            }
+            
+            int log_idx_low = sample_count * 0.02;
+            int log_idx_high = sample_count * 0.98;
+            std::nth_element(log_samples, log_samples + log_idx_low, log_samples + sample_count);
+            float log_min = log_samples[log_idx_low];
+            std::nth_element(log_samples + log_idx_low + 1, log_samples + log_idx_high, log_samples + sample_count);
+            float log_max = log_samples[log_idx_high];
+            
+            if (log_max <= log_min + 0.1f) {
+                log_max = log_min + 1.0f;
+            }
+            
+            // Normalize to 0-255 (higher inv_depth = closer = brighter)
+            double log_range = log_max - log_min;
+            double log_scale = 255.0 / log_range;
+            double log_offset = -255.0 * log_min / log_range;
+            log_inv_depth.convertTo(depth_small_8u, CV_8U, log_scale, log_offset);
+        }
+        // apply a sobel filter to depth_small_8u
+        if (params.rgd_type == "laplacian") {
+        TicToc t_sobel;
+        cv::Mat edges_temp;
 
-        // [OPTIMIZATION D]: Resize the Byte Image (Fastest Resize)
-        // INTER_NEAREST is fastest, INTER_LINEAR looks better. Try NEAREST if still slow.
-        
+        cv::Laplacian(depth_small_8u, edges_temp, CV_64F, 3);
+        cv::convertScaleAbs(edges_temp, depth_small_8u);
+        //normalize sobel output again by 98% clamping
+        //double minVal, maxVal;
+        //cv::minMaxLoc(depth_small_8u, &minVal, &maxVal);
+        //double lower_bound = minVal + 0.02 * (maxVal - minVal);
+        //double upper_bound = maxVal - 0.02 * (maxVal - minVal);
+        //depth_small_8u.setTo(lower_bound, depth_small_8u < lower_bound);
+        //depth_small_8u.setTo(upper_bound, depth_small_8u > upper_bound);
+        //depth_small_8u.convertTo(depth_small_8u, CV_8U, 255.0 / (upper_bound - lower_bound), -255.0 * lower_bound / (upper_bound - lower_bound));
+        //double time_sobel = t_sobel.toc();
+        //printf("Sobel time: %.2f ms\n", time_sobel);
+        // Resize the byte image using fastest method
+        //cv::GaussianBlur(depth_small_8u, depth_small_8u, cv::Size(3, 3), 0);
+    
         cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
-        
+        }
+
+
+        else if (params.rgd_type == "sobel") {
+        TicToc t_sobel;
+        cv::Mat edges_temp;
+
+        cv::Sobel(depth_small_8u, edges_temp, CV_64F, 1, 1);
+        cv::convertScaleAbs(edges_temp, depth_small_8u);
+        //normalize sobel output again by 98% clamping
+        double minVal, maxVal;
+        cv::minMaxLoc(depth_small_8u, &minVal, &maxVal);
+        double lower_bound = minVal + 0.02 * (maxVal - minVal);
+        double upper_bound = maxVal - 0.02 * (maxVal - minVal);
+        depth_small_8u.setTo(lower_bound, depth_small_8u < lower_bound);
+        depth_small_8u.setTo(upper_bound, depth_small_8u > upper_bound);
+        depth_small_8u.convertTo(depth_small_8u, CV_8U, 255.0 / (upper_bound - lower_bound), -255.0 * lower_bound / (upper_bound - lower_bound));
+        double time_sobel = t_sobel.toc();
+        printf("Sobel time: %.2f ms\n", time_sobel);
+        // Resize the byte image using fastest method
+
+        cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
+        }
+        else if (params.rgd_type == "morph_grad") {
+          
+    // --- 3. Morphological Gradient ---
+    // Calculates: Dilation - Erosion
+    // Result: A "skeleton" of the edges, very thin and structurally accurate.
+    
+    // Kernel size 3x3 is standard for thin edges. 
+    // Use 5x5 if you want thicker edges for the tracker to grab easier.
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    
+    // Morphology supports in-place, but explicit temp is safer for debug
+    cv::Mat morph_temp;
+    cv::morphologyEx(depth_small_8u, morph_temp, cv::MORPH_GRADIENT, kernel);
+    
+    depth_small_8u = morph_temp;
+
+        cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
+}
+else if (params.rgd_type == "canny_stable") {
+    // --- Step 1: Stabilization (Anti-Flicker) ---
+    // Zero-shot estimators "breathe" (global contrast changes). 
+    // We stretch the histogram to full 0-255 range every frame.
+    // This makes the "threshold" for Canny consistent across frames.
+    cv::normalize(depth_small_8u, depth_small_8u, 0, 255, cv::NORM_MINMAX);
+
+    // --- Step 2: Guided Filter (Optional but recommended) ---
+    // Snaps the depth edges to the texture edges before we detect them.
+    // If you want pure speed, you can comment this block out.
+    cv::Mat refined_depth;
+    cv::Mat _img_resized;
+    cv::resize(_img, _img_resized, cv::Size(296, 296), 0, 0, cv::INTER_LINEAR);
+
+    cv::ximgproc::guidedFilter(_img_resized, depth_small_8u, refined_depth, 3, 300.0);
+    depth_small_8u = refined_depth;
+
+    // --- Step 3: Canny Edge Detection (The Discontinuity King) ---
+    // This binarizes the image. 
+    // It kills "weak" gradient noise (flicker) and keeps only strong structural edges.
+    // thresholds: 50 (low), 150 (high). Adjust depending on your depth map contrast.
+    cv::Mat binary_edges;
+    cv::Canny(depth_small_8u, binary_edges, 10, 30);
+
+    // --- Step 4: Gaussian Blur (The KLT Enabler) ---
+    // KLT fails on 1-pixel binary lines (it needs a gradient slope to optimize).
+    // We blur the binary lines to create a "thick" gradient ramp.
+    // Size (3,3) or (5,5) creates a nice tracking surface.
+    cv::GaussianBlur(binary_edges, depth_small_8u, cv::Size(3, 3), 0);
+    cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
+    // Result: depth_small_8u is now a clean, stable "edge probability map" 
+    // perfectly suited for mixing with your gray image.
+}
+else if (params.rgd_type == "guided_sobel") {
+    // --- 4. Guided Filter + Sobel ---
+    // Step A: Use the Gray Image to snap depth edges to the correct pixels
+    // Step B: Calculate the gradient of this aligned depth
+    TicToc t_sobel;
+    cv::Mat refined_depth;
+    
+    // Radius: 3-5 (spatial window)
+    // eps: 100.0 - 500.0 (regularization for 8-bit 0-255 images). 
+    //      Controls how much "texture" from the guide is transferred.
+    //      Higher eps = smoother depth, Lower eps = more guide texture copy.
+    int radius = 3;
+    double eps = 300.0; 
+    
+    // Requires: #include <opencv2/ximgproc.hpp>
+    //resize _img to 296x296
+    cv::Mat _img_resized;
+    cv::resize(_img, _img_resized, cv::Size(296, 296), 0, 0, cv::INTER_LINEAR);
+    cv::ximgproc::guidedFilter(_img_resized, depth_small_8u, refined_depth, radius, eps);
+
+    // Step C: Now run Sobel (or Scharr) on the *refined* depth
+    // We compute X and Y derivatives and blend them approximating gradient magnitude
+    cv::Mat grad_x, grad_y, grad_abs;
+    
+    cv::Sobel(refined_depth, grad_x, CV_16S, 1, 0, 3);
+    cv::Sobel(refined_depth, grad_y, CV_16S, 0, 1, 3);
+    
+    // Convert back to 8-bit absolute values
+    cv::convertScaleAbs(grad_x, grad_x);
+    cv::convertScaleAbs(grad_y, grad_y);
+    
+    // Mix X and Y (Approximate magnitude: 0.5*x + 0.5*y)
+    cv::addWeighted(grad_x, 0.5, grad_y, 0.5, 0, depth_small_8u);
+
+        cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
+    t_sobel.toc();
+    printf("Guided Sobel time: %.2f ms\n", t_sobel.toc());
+}
+
         pubDepthTrackImage(depth_8u, t);
-        // [OPTIMIZATION E]: Single Channel Blending (No Merge/Split/CvtColor)
-        // Weighted sum: 85% Original Gray + 15% Depth Map
-        cv::addWeighted(_img, 0.85, depth_8u, 0.15, 0, img_for_tracker);
+        // Efficient single-channel blending (avoids merge/split/cvtColor overhead)
+        // Weighted sum: Original gray image gradually blended with depth map
+        float coeff = nonlinear_input_cnt / 100.0f;
+        cv::addWeighted(_img, 1 - coeff, depth_8u, coeff, 0, img_for_tracker);
 
         double time_proc = t_proc.toc();
-
+  
         
         
         printf("[Depth] Infer: %.2f ms | Post-Proc: %.2f ms | Total Add: %.2f ms\n", 
                 time_infer, time_proc, time_infer + time_proc);
+        }
         
     } 
   // Else: img_for_tracker remains the original _img (Mono8)

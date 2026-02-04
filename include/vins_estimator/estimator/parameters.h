@@ -79,7 +79,7 @@ struct Parameters {
   int feature_debug;
   std::string feature_debug_path;
   bool use_depth;
-  
+  std::string rgd_type;
   int use_cuda_in_optimization;
   int use_cuda_in_tracking;
   int rgd;

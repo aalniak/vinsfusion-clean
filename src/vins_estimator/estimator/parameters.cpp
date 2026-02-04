@@ -176,6 +176,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   fsSettings["cx"] >> cx;
   fsSettings["cy"] >> cy;
   fsSettings["depth_engine_path"] >> depth_engine_path;
+  fsSettings["rgd_type"] >> rgd_type;
   save_image = fsSettings["save_image"];
   load_previous_pose_graph = fsSettings["load_previous_pose_graph"];
 

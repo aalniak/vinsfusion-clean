@@ -98,7 +98,7 @@ class Estimator {
   std::map<double, cv::Mat> image_cache;
   std::mutex mCache;
   Parameters &params;
-
+  int nonlinear_input_cnt = 0;
   std::mutex mProcess;
   std::mutex mBuf;
   std::mutex mPropagate;
