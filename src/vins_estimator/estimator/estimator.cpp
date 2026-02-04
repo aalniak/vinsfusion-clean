@@ -405,13 +405,17 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
         
         // --- PROCESS DEPTH IF AVAILABLE ---
         if (!raw_inv_depth.empty()) {
+          
              // --- SYNC BRANCH (Stateless / GT) ---
             double time_infer = t_infer.toc();
              // --- TIMER: POST-PROCESSING ---
             TicToc t_proc;
-            
              // Perform math operations on small float image (518x518) for efficiency
              cv::Mat inv_depth = raw_inv_depth;  // Renamed for clarity - this IS inverse depth
+             if (params.use_depth && WEIGHT > 0.0){
+                raw_inv_depth *= cached_scale;
+                raw_inv_depth += cached_shift;
+             }
 
         // Fast strided sampling for distribution estimation (~0.05ms)
         // Sample approximately 600 pixels to estimate the distribution
@@ -521,7 +525,13 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
             double scale = 255.0 / (robustMax - robustMin);
             inv_depth.convertTo(depth_small_8u, CV_8U, scale, -robustMin * scale);
         }
-
+        // apply a sobel filter to depth_small_8u
+        TicToc t_sobel;
+        cv::Sobel(depth_small_8u, depth_small_8u, CV_8U, 1, 1);
+        //normalize sobel output
+        cv::normalize(depth_small_8u, depth_small_8u, 0, 255, cv::NORM_MINMAX);
+        double time_sobel = t_sobel.toc();
+        printf("Sobel time: %.2f ms\n", time_sobel);
         // Resize the byte image using fastest method
         cv::resize(depth_small_8u, depth_8u, _img.size(), 0, 0, cv::INTER_LINEAR);
         
@@ -1204,12 +1214,12 @@ void Estimator::processImage(
                                 // Depth from worker is now 1280x720 (or whatever input size was)
                                 frame.depth_map = depth.clone();
                                 
-                                // Visualization (Optional)
                                 cv::Mat depth_vis;
                                 cv::normalize(frame.depth_map, depth_vis, 0, 255, cv::NORM_MINMAX);
                                 depth_vis.convertTo(depth_vis, CV_8UC1);
+                                if (!params.rgd){
                                 pubDepthTrackImage(depth_vis, ts);
-                                
+                                }
                                 //ROS_INFO("Lazy Inference: Matched Frame %.6f", ts);
                                 ROS_INFO("depthmap is found and embedded for %.6f", ts);
                             }
@@ -1311,8 +1321,9 @@ void Estimator::processImage(
                             cv::Mat depth_vis;
                             cv::normalize(resized_depth, depth_vis, 0, 255, cv::NORM_MINMAX);
                             depth_vis.convertTo(depth_vis, CV_8UC1);
-                            pubDepthTrackImage(depth_vis, ts);
-                            
+                            if (!params.rgd) {
+                                pubDepthTrackImage(depth_vis, ts);
+                            }
                             ROS_INFO("Lazy Inference: Depth injected for Frame %.6f", ts);
                         }
                         
