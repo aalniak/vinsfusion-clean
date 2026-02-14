@@ -179,6 +179,9 @@ Estimator::Estimator(Parameters &params)
   std::cout << "Engine is loaded" << std::endl;
   // Global or member variable in Estimator class
   //SplgInference* sp_lg_inferer = new SplgInference("/datasets/splg_1280x800_fp16.engine");
+  
+  // [Refinement]
+  photometricRefinement = std::make_shared<PhotometricRefinement>();
 }
 
 Estimator::~Estimator() {
@@ -1395,6 +1398,11 @@ void Estimator::processImage(
           imageframe.raw_image = image_cache[header];
       }
       mCache.unlock();
+      
+      // Attach depth map for photometric refinement
+      if (!current_depth.empty()) {
+          imageframe.depth_map = current_depth.clone();
+      }
   }
 
   if (marginalization_flag == MARGIN_OLD) {
@@ -1409,6 +1417,52 @@ void Estimator::processImage(
   auto insertion_result = all_image_frame.insert(make_pair(header, imageframe));
   auto& map_frame_ref = insertion_result.first->second;
   //all_image_frame.insert(make_pair(header, imageframe));
+  
+  // [Refinement] Buffer Images
+  if (!imageframe.raw_image.empty()) {
+      buffer_images_[header] = imageframe.raw_image.clone(); // Clone to own data
+      printf("[Buffer] Stored raw_image for t=%.3f (buffer size: %zu)\n", header, buffer_images_.size());
+  } else {
+      printf("[Buffer] WARNING: raw_image is EMPTY for t=%.3f\n", header);
+  }
+  if (!imageframe.depth_map.empty()) {
+      buffer_depths_[header] = imageframe.depth_map.clone();
+      printf("[Buffer] Stored depth_map for t=%.3f (buffer size: %zu)\n", header, buffer_depths_.size());
+  }
+  
+  // Prune Buffers (Keep window + margin)
+  if (!buffer_images_.empty()) {
+      double t_old = Headers[0] - 5.0; // 5 seconds buffer
+      auto it = buffer_images_.begin();
+      while(it != buffer_images_.end()) {
+          if (it->first < t_old) it = buffer_images_.erase(it);
+          else ++it;
+      }
+      auto it_d = buffer_depths_.begin();
+      while(it_d != buffer_depths_.end()) {
+          if (it_d->first < t_old) it_d = buffer_depths_.erase(it_d);
+          else ++it_d;
+      }
+  }
+  
+  // [Refinement] Submit Task if Keyframe and Initialized - Optimize 7 and 8
+  printf("[Refinement Check] solver=%d, hasPhoto=%d, margin=%d, fcount=%d\n", 
+         solver_flag == NON_LINEAR, photometricRefinement != nullptr, marginalization_flag == MARGIN_OLD, frame_count);
+  
+  if (solver_flag == NON_LINEAR && photometricRefinement && marginalization_flag == MARGIN_OLD) {
+      if (frame_count >= WINDOW_SIZE) {
+          photometricRefinement->clearQueues();
+          submitPhotometricRefinement(6, 8);
+          submitPhotometricRefinement(8, 6);
+          submitPhotometricRefinement(7, 9);
+          submitPhotometricRefinement(8, 10);
+          
+
+          
+
+      }
+  }
+
   tmp_pre_integration = new IntegrationBase{
       acc_0,        gyr_0,        Bas[frame_count], Bgs[frame_count],
       params.acc_n, params.gyr_n, params.acc_w,     params.gyr_w,
@@ -1540,6 +1594,7 @@ void Estimator::processImage(
       smartDepthInitialization();
       ROS_INFO("smart depth initialization costs: %f ms", t_depth_init.toc());
     }
+    
     optimization();
     set<int> removeIndex;
     outliersRejection(removeIndex);
@@ -3494,6 +3549,69 @@ void Estimator::optimization() {
   //options.linear_solver_type = ceres::DENSE_SCHUR;
   // options.num_threads = 2;
   options.trust_region_strategy_type = ceres::DOGLEG;
+
+  // [Refinement] Add Factors
+    std::cout << "[DEBUG] photometricRefinement exists: " << (photometricRefinement ? "YES" : "NO") << std::endl;
+    if (photometricRefinement) {
+        RefinementResult res;
+        int result_count = 0;
+        // Consume all available results from the queue
+        while(photometricRefinement->getResult(res)) {
+            result_count++;
+            std::cout << "[DEBUG] Got result #" << result_count 
+                      << " | ref=" << res.timestamp_ref 
+                      << " cur=" << res.timestamp_cur 
+                      << " success=" << res.success << std::endl;
+            
+            // Find indices in current window
+            int idx_ref = -1, idx_cur = -1;
+            for (int i = 0; i <= WINDOW_SIZE; i++) {
+                if (std::abs(Headers[i] - res.timestamp_ref) < 1e-5) idx_ref = i;
+                if (std::abs(Headers[i] - res.timestamp_cur) < 1e-5) idx_cur = i;
+            }
+            
+            std::cout << "[DEBUG] idx_ref=" << idx_ref << " idx_cur=" << idx_cur << std::endl;
+            
+            if (idx_ref >= 0 && idx_cur >= 0 && res.success) {
+                // Info is 6x6. Need sqrt_info.
+                Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(res.information);
+                Eigen::Matrix<double, 6, 6> sqrt_info = llt.matrixL().transpose();
+                
+                // Refinement returns Camera Relative Pose (T_c_ref_c_cur)
+                // VINS RelativePoseFactor expects Body Relative Pose (T_b_ref_b_cur)
+                // T_b_ref_b_cur = T_b_c * T_c_ref_c_cur * T_c_b
+                
+                Eigen::Quaterniond q_c_ref_cur = res.q_ref_cur;
+                Eigen::Vector3d t_c_ref_cur = res.t_ref_cur;
+                
+                Eigen::Matrix3d R_b_c = params.ric[0];
+                Eigen::Vector3d t_b_c = params.tic[0];
+                
+                Eigen::Quaterniond Q_b_c(R_b_c);
+                Eigen::Quaterniond Q_c_b = Q_b_c.inverse();
+                Eigen::Vector3d t_c_b = -(Q_c_b * t_b_c);
+                
+                // T_b_ref_b_cur = T_b_c * (T_c_ref_c_cur * T_c_b)
+                Eigen::Quaterniond q_b_ref_cur = Q_b_c * q_c_ref_cur * Q_c_b;
+                Eigen::Vector3d t_b_ref_cur = Q_b_c * (q_c_ref_cur * t_c_b + t_c_ref_cur) + t_b_c;
+
+                ceres::CostFunction* factor = new ceres::AutoDiffCostFunction<RelativePoseFactor, 6, 7, 7>(
+                     new RelativePoseFactor(t_b_ref_cur, q_b_ref_cur, sqrt_info));
+                    
+                problem.AddResidualBlock(factor, NULL, 
+                    para_Pose[idx_ref], para_Pose[idx_cur]);
+
+                 ROS_INFO("[Refinement] Added Factor between Frame %d (%.3f) and %d (%.3f)", 
+                          idx_ref, res.timestamp_ref, idx_cur, res.timestamp_cur);
+            } else {
+                std::cout << "[DEBUG] Skipped: idx_ref=" << idx_ref 
+                          << " idx_cur=" << idx_cur 
+                          << " success=" << res.success << std::endl;
+            }
+        }
+        // Debug print removed
+    }
+
   options.max_num_iterations = params.num_iterations;
   // options.use_explicit_schur_complement = true;
   // options.minimizer_progress_to_stdout = true;
@@ -4079,5 +4197,82 @@ void Estimator::updateLatestStates() {
   }
   mPropagate.unlock();
 }
+
+
+
+void Estimator::submitPhotometricRefinement(int idx_ref, int idx_cur) {
+    printf("[Refinement] Conditions met, checking frames %d and %d\n", idx_ref, idx_cur);
+    
+    // Ensure we have enough frames
+    if (frame_count < WINDOW_SIZE) return;
+    
+    double t_ref = Headers[idx_ref];
+    double t_cur = Headers[idx_cur];
+    printf("[Refinement] Headers[%d]=%.3f, Headers[%d]=%.3f\n", idx_ref, t_ref, idx_cur, t_cur);
+    
+    // Get depth from all_image_frame (ImageFrame holds depth_map)
+    bool has_depth = false;
+    cv::Mat depth_ref;
+    if (all_image_frame.count(t_ref)) {
+        depth_ref = all_image_frame.at(t_ref).depth_map;
+        has_depth = !depth_ref.empty();
+    }
+    
+    printf("[Refinement] Buffer check: img[%.3f]=%ld, img[%.3f]=%ld, depth_from_frame[%.3f]=%d\n",
+           t_ref, buffer_images_.count(t_ref), t_cur, buffer_images_.count(t_cur), t_ref, has_depth);
+    
+    cv::Mat img_ref, img_cur;
+    
+    if (buffer_images_.count(t_ref) && buffer_images_.count(t_cur) && has_depth) {
+         img_ref = buffer_images_[t_ref];
+         img_cur = buffer_images_[t_cur];
+         
+         if (!img_ref.empty() && !img_cur.empty() && !depth_ref.empty()) {
+              // Calculate Initial Guess based on Ps[7] and Ps[8]
+              Eigen::Vector3d P_ref = Ps[idx_ref];
+              Eigen::Matrix3d R_ref = Rs[idx_ref];
+              
+              Eigen::Vector3d P_cur = Ps[idx_cur];
+              Eigen::Matrix3d R_cur = Rs[idx_cur];
+              
+              Eigen::Quaterniond Q_ref(R_ref);
+              Eigen::Quaterniond Q_cur(R_cur);
+              
+              // DEBUG: Print World Poses
+              printf("[Estimator] PhotoRef Init (%d->%d): P_%d(Ref)=%.3f,%.3f,%.3f  P_%d(Cur)=%.3f,%.3f,%.3f\n", 
+                      idx_ref, idx_cur, idx_ref, P_ref.x(), P_ref.y(), P_ref.z(), idx_cur, P_cur.x(), P_cur.y(), P_cur.z());
+      
+              // IMU Relative Pose: T_cur_ref (Ref in Cur frame)
+              Eigen::Quaterniond Q_cur_inv = Q_cur.inverse();
+              Eigen::Quaterniond q_b_cur_ref = Q_cur_inv * Q_ref;
+              Eigen::Vector3d t_b_cur_ref = Q_cur_inv * (P_ref - P_cur);
+              
+              // Convert to Camera Frame (Cam 0)
+              // T_c_cur_ref = T_c_b * T_b_cur_ref * T_b_c
+              // ric, tic are T_b_c (Body->Cam)
+              Eigen::Matrix3d R_b_c = ric[0];
+              Eigen::Vector3d t_b_c = tic[0];
+              
+              Eigen::Matrix3d R_c_b = R_b_c.transpose();
+              Eigen::Vector3d t_c_b = -R_c_b * t_b_c;
+              
+              Eigen::Quaterniond Q_c_b(R_c_b);
+              Eigen::Quaterniond Q_b_c(R_b_c);
+              
+              // T_c_cur_ref = T_c_b * T_b_cur_ref * T_b_c
+              Eigen::Quaterniond q_initial = Q_c_b * q_b_cur_ref * Q_b_c;
+              Eigen::Vector3d t_initial = Q_c_b * (q_b_cur_ref * t_b_c + t_b_cur_ref) + t_c_b;
+             
+             // Global params for K
+             Eigen::Matrix3d K;
+             K << params.fx, 0, params.cx,
+                  0, params.fy, params.cy,
+                  0, 0, 1;
+              cv::Mat depth = depth_ref.clone();
+              cv::Mat aligned_depth = depth * cached_scale + cached_shift;
+             photometricRefinement->submitTask(t_ref, t_cur, img_ref, img_cur, aligned_depth, K, q_initial, t_initial);
+         }
+}
+    }
 
 }  // namespace vins::estimator

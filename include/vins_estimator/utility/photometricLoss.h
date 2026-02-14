@@ -49,7 +49,9 @@ public:
         const Eigen::Matrix3d& K,
         const Eigen::Matrix4d& T_target_src,
         double ssim_weight = 0.85,
-        double l1_weight = 0.15);
+        double l1_weight = 0.15,
+        double alpha = 1.0, double beta = 0.0,
+        double scale = 1.0, double shift = 0.0);
 
     /**
      * GPU-accelerated version of compute().
@@ -62,7 +64,9 @@ public:
         const Eigen::Matrix3d& K,
         const Eigen::Matrix4d& T_target_src,
         double ssim_weight = 0.85,
-        double l1_weight = 0.15);
+        double l1_weight = 0.15,
+        double alpha = 1.0, double beta = 0.0,
+        double scale = 1.0, double shift = 0.0);
 
     /**
      * Compute SSIM between two images (CPU version).
@@ -80,7 +84,8 @@ public:
         const Eigen::Matrix4d& T_target_src,
         cv::Mat& map_x,
         cv::Mat& map_y,
-        cv::Mat& valid_mask);
+        cv::Mat& valid_mask,
+        double scale = 1.0, double shift = 0.0);
 
 private:
     // Constants for SSIM computation
@@ -98,7 +103,9 @@ inline void PhotometricLoss::generateWarpMaps(
     const Eigen::Matrix4d& T_target_src,
     cv::Mat& map_x,
     cv::Mat& map_y,
-    cv::Mat& valid_mask)
+    cv::Mat& valid_mask,
+    double scale,
+    double shift)
 {
     int rows = depth_src.rows;
     int cols = depth_src.cols;
@@ -130,15 +137,18 @@ inline void PhotometricLoss::generateWarpMaps(
         for (int u = 0; u < cols; ++u) {
             float inv_d = depth_row[u];
             
+            // Apply Mono-Depth Scale and Shift: inv_d_metric = s * inv_d_mono + h
+            float inv_d_metric = static_cast<float>(scale * inv_d + shift);
+            
             // Invalid depth check
-            if (inv_d <= 0.001f || inv_d > 10.0f) {
+            if (inv_d_metric <= 0.001f || inv_d_metric > 10.0f) {
                 map_x_row[u] = -1.0f;
                 map_y_row[u] = -1.0f;
                 valid_row[u] = 0;
                 continue;
             }
             
-            float d = 1.0f / inv_d;  // Convert to metric depth
+            float d = 1.0f / inv_d_metric;  // Convert to metric depth
             
             // Back-project to 3D (normalized coords)
             float x_norm = (u - cx) / fx;
@@ -213,11 +223,13 @@ inline double PhotometricLoss::compute(
     const Eigen::Matrix3d& K,
     const Eigen::Matrix4d& T_target_src,
     double ssim_weight,
-    double l1_weight)
+    double l1_weight,
+    double alpha, double beta,
+    double scale, double shift)
 {
     // Generate warp maps
     cv::Mat map_x, map_y, valid_mask;
-    generateWarpMaps(depth_src, K, T_target_src, map_x, map_y, valid_mask);
+    generateWarpMaps(depth_src, K, T_target_src, map_x, map_y, valid_mask, scale, shift);
     
     // Warp target image to source viewpoint
     cv::Mat warped_target;
@@ -225,8 +237,17 @@ inline double PhotometricLoss::compute(
     
     // Apply valid mask
     cv::Mat img_src_masked, warped_masked;
+    cv::Mat warped_corrected;
+    
+    // Apply Affine Transformation: I' = alpha * I + beta
+    if (std::abs(alpha - 1.0) > 1e-5 || std::abs(beta) > 1e-5) {
+        warped_target.convertTo(warped_corrected, -1, alpha, beta);
+    } else {
+        warped_corrected = warped_target;
+    }
+
     img_src.copyTo(img_src_masked, valid_mask);
-    warped_target.copyTo(warped_masked, valid_mask);
+    warped_corrected.copyTo(warped_masked, valid_mask);
     
     // Count valid pixels
     int valid_pixels = cv::countNonZero(valid_mask);
@@ -254,11 +275,13 @@ inline double PhotometricLoss::computeGPU(
     const Eigen::Matrix3d& K,
     const Eigen::Matrix4d& T_target_src,
     double ssim_weight,
-    double l1_weight)
+    double l1_weight,
+    double alpha, double beta,
+    double scale, double shift)
 {
     // Generate warp maps on CPU (No download needed)
     cv::Mat map_x, map_y, valid_mask;
-    generateWarpMaps(depth_src_cpu, K, T_target_src, map_x, map_y, valid_mask);
+    generateWarpMaps(depth_src_cpu, K, T_target_src, map_x, map_y, valid_mask, scale, shift);
     
     // Upload maps to GPU (Required per iteration as T changes)
     cv::cuda::GpuMat map_x_gpu, map_y_gpu;
@@ -276,8 +299,17 @@ inline double PhotometricLoss::computeGPU(
     // Apply mask and compute loss on CPU
     // We reuse the CPU valid_mask calculated during map generation
     cv::Mat img_src_masked, warped_masked;
+    cv::Mat warped_corrected;
+    
+    // Apply Affine Transformation: I' = alpha * I + beta
+    if (std::abs(alpha - 1.0) > 1e-5 || std::abs(beta) > 1e-5) {
+        warped_target.convertTo(warped_corrected, -1, alpha, beta);
+    } else {
+        warped_corrected = warped_target;
+    }
+    
     img_src_cpu.copyTo(img_src_masked, valid_mask);
-    warped_target.copyTo(warped_masked, valid_mask);
+    warped_corrected.copyTo(warped_masked, valid_mask);
     
     int valid_pixels = cv::countNonZero(valid_mask);
     if (valid_pixels < 100) {

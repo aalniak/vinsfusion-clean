@@ -134,6 +134,7 @@ add_executable(
   src/vins_estimator/factor/projectionOneFrameTwoCamFactor.cpp
   src/vins_estimator/factor/marginalization_factor.cpp
   src/vins_estimator/utility/utility.cpp
+  src/vins_estimator/utility/PhotometricRefinement.cpp
   src/vins_estimator/utility/visualization.cpp
   src/vins_estimator/utility/CameraPoseVisualization.cpp
   src/vins_estimator/initial/solve_5pts.cpp

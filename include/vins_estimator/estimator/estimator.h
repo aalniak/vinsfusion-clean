@@ -32,6 +32,8 @@
 #include "vins_estimator/estimator/DepthInfer.h"
 #include "vins_estimator/estimator/DepthInferVideo.h"
 #include "vins_estimator/estimator/SplgInference.h"
+#include <vins_estimator/utility/PhotometricRefinement.h>
+#include <vins_estimator/factor/RelativePoseFactor.h>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
 #include <mutex>
@@ -79,6 +81,7 @@ class Estimator {
   void processImage(
       const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
       double header);
+  void submitPhotometricRefinement(int idx_ref, int idx_cur);
   void processMeasurements();
   void changeSensorType(int use_imu, int use_stereo);
 
@@ -117,6 +120,7 @@ class Estimator {
   enum MarginalizationFlag { MARGIN_OLD = 0, MARGIN_SECOND_NEW = 1 };
   std::shared_ptr<DepthInfer> depthInferer;
   std::shared_ptr<DepthInferVideo> depthInfererVideo;
+  std::shared_ptr<PhotometricRefinement> photometricRefinement;
   std::map<double, cv::Mat> image_cache;
   std::map<double, int> frame_index_cache;  // Maps timestamp to absolute frame index
   std::mutex mCache;
@@ -161,6 +165,10 @@ class Estimator {
   Matrix3d back_R0, last_R, last_R0;
   Vector3d back_P0, last_P, last_P0;
   double Headers[(WINDOW_SIZE + 1)];
+  
+  // Buffers for Photometric Refinement
+  std::map<double, cv::Mat> buffer_images_;
+  std::map<double, cv::Mat> buffer_depths_;
 
   IntegrationBase *pre_integrations[(WINDOW_SIZE + 1)] = {};
   Vector3d acc_0, gyr_0;
