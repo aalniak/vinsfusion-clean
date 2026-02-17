@@ -19,7 +19,7 @@ for d in "$HOST_DIR_1" "$HOST_DIR_2"; do
 done
 
 # Defaults (override via env if you want)
-IMAGE=ros:vins-depth-trt-cu-pose
+IMAGE=claude:photometric
 NAME="${NAME:-jetson_container_$(date +%Y%m%d_%H%M%S)}"
 SHM_SIZE="${SHM_SIZE:-8g}"
 
@@ -71,6 +71,7 @@ docker run \
   \
   -v "$HOME/.ws/vinsfusion/:/root/catkin_ws/" \
   -v "$(pwd)/:/root/catkin_ws/src/VINS-Fusion/" \
+  -v "$HOME/.ws/vinsfusion/.claude-state:/root/.claude" \
   -v "${HOST_DIR_1}:/datasets" \
   -v "${HOST_DIR_2}:/depth" \
   \

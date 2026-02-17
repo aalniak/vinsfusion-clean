@@ -27,13 +27,25 @@ struct RefinementResult {
     // Extra params
     double alpha = 1.0, beta = 0.0;
     double scale = 1.0, shift = 0.0;
-    int feature_count = 0; // Debug
+    int feature_count = 0;
+    double initial_cost = 0.0;
+    double final_cost = 0.0;
+};
+
+struct PatternMember {
+    int du, dv;        // pixel offset from center in reference image
+    double intensity;  // reference intensity at this offset
 };
 
 struct FeaturePoint {
-    Eigen::Vector2d u; // pixel coordinate
-    double intensity;
-    double inv_depth;
+    Eigen::Vector2d u; // pixel coordinate (center)
+    double intensity;  // center intensity
+    double inv_depth;  // center inverse depth
+
+    // Sparse pattern: depth-validated samples around center
+    static constexpr int MAX_PATTERN = 8;
+    PatternMember pattern[MAX_PATTERN];
+    int pattern_count = 0;
 };
 
 class PhotometricRefinement {
@@ -42,7 +54,8 @@ public:
         POSE_ONLY,
         POSE_AFFINE,
         POSE_SCALE_SHIFT,
-        POSE_FULL
+        POSE_FULL,
+        POSE_FULL_SHIFT  // pose + affine + scale + shift
     };
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -55,10 +68,13 @@ public:
     Mode getMode() const { return mode_; }
 
     // Submit a task to the refinement thread
-    void submitTask(double t_ref, double t_cur, 
-                    const cv::Mat& img_ref, const cv::Mat& img_cur, 
-                    const cv::Mat& depth_ref, const Eigen::Matrix3d& K,
-                    const Eigen::Quaterniond& q_initial, const Eigen::Vector3d& t_initial);
+    void submitTask(double t_ref, double t_cur,
+                    const cv::Mat& img_ref, const cv::Mat& img_cur,
+                    const cv::Mat& depth_ref, const cv::Mat& depth_cur,
+                    const Eigen::Matrix3d& K,
+                    const Eigen::Quaterniond& q_initial, const Eigen::Vector3d& t_initial,
+                    double init_scale = 1.0, double init_shift = 0.0,
+                    double init_scale_cur = 1.0, double init_shift_cur = 0.0);
     
     // Clear pending tasks (e.g. when starting a new optimization iteration)
     void clearQueues();
@@ -72,6 +88,20 @@ public:
                              std::vector<FeaturePoint>& features,
                              int grid_size = 32, int features_per_grid = 1);
     
+    // Dense depth-to-depth scale/shift refinement (runs after photometric GN)
+    struct DenseSSResult {
+        double scale, shift;
+        int num_valid;
+        double final_cost;
+    };
+    DenseSSResult refineDenseScaleShift(
+        const cv::Mat& depth_ref, const cv::Mat& depth_cur,
+        const Eigen::Matrix3d& R_cur_ref, const Eigen::Vector3d& t_cur_ref,
+        const Eigen::Matrix3d& K,
+        double s_ref, double h_ref,
+        double s_cur, double h_cur,
+        int subsample = 4);
+
     // Depth-Percentile Feature Selection
     // Selects pixels whose fitted (scaled/shifted) inverse depth is in the 40%-70% percentile range
     void selectPixelFeaturesByDepthPercentile(const cv::Mat& img, const cv::Mat& depth,
@@ -85,9 +115,14 @@ private:
         double t_ref, t_cur;
         cv::Mat img_ref, img_cur;
         cv::Mat depth_ref;
+        cv::Mat depth_cur;           // target frame's depth map (for dense SS refinement)
         Eigen::Matrix3d K;
         Eigen::Quaterniond q_initial; // T_cur_ref_initial (from VINS prediction)
         Eigen::Vector3d t_initial;
+        double init_scale = 1.0;
+        double init_shift = 0.0;
+        double init_scale_cur = 1.0; // target frame's current scale
+        double init_shift_cur = 0.0; // target frame's current shift
     };
 
     // Optimization Parameters
@@ -95,7 +130,7 @@ private:
     double l1_weight_ = 0.15;
     double huber_loss_ = 15.0; // Huber threshold on raw intensity difference
     
-    Mode mode_ = POSE_FULL;
+    Mode mode_ = POSE_FULL_SHIFT;
     bool use_sparse_ = true; // Toggle for sparse vs dense
     
     // --- Hand-rolled Gauss-Newton Solver ---
@@ -168,7 +203,8 @@ struct GNResult {
         bool opt_affine,
         bool opt_scaleshift,
         const double* init_affine = nullptr,
-        const double* init_scaleshift = nullptr
+        const double* init_scaleshift = nullptr,
+        bool opt_shift = false
     );
     // Dual-thread architecture to prevent frame aging
     void threadLoop0();  // Worker thread 0

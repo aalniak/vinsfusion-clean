@@ -82,6 +82,7 @@ class Estimator {
       const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
       double header);
   void submitPhotometricRefinement(int idx_ref, int idx_cur);
+  bool isTaskMeaningful(int idx_ref, int idx_cur);
   void processMeasurements();
   void changeSensorType(int use_imu, int use_stereo);
 

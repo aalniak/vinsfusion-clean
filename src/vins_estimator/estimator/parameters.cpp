@@ -189,7 +189,21 @@ void Parameters::read_from_file(const std::string &config_file) {
   } else {
       fsSettings["video_mode"] >> video_mode;
   }
-  
+
+  if (!fsSettings["bidir_consistency_mode"].empty())
+      fsSettings["bidir_consistency_mode"] >> bidir_consistency_mode;
+  if (!fsSettings["bidir_trans_thresh"].empty())
+      fsSettings["bidir_trans_thresh"] >> bidir_trans_thresh;
+  if (!fsSettings["bidir_rot_thresh"].empty())
+      fsSettings["bidir_rot_thresh"] >> bidir_rot_thresh;
+
+  if (!fsSettings["vio_distance_gate"].empty())
+      fsSettings["vio_distance_gate"] >> vio_distance_gate;
+  if (!fsSettings["vio_distance_gate_k"].empty())
+      fsSettings["vio_distance_gate_k"] >> vio_distance_gate_k;
+  if (!fsSettings["vio_distance_gate_min"].empty())
+      fsSettings["vio_distance_gate_min"] >> vio_distance_gate_min;
+
   if (fsSettings["video_depth_engine_path"].empty()) {
       video_depth_engine_path = "";
   } else {

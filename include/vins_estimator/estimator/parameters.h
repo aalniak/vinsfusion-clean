@@ -148,6 +148,19 @@ struct Parameters {
   
   int video_mode;                           // 0: default, 1: video/stateful
 
+  // Bidirectional consistency for photometric refinement
+  // 0: disabled, 1: reject inconsistent pairs, 2: downweight by consistency
+  int bidir_consistency_mode = 0;
+  double bidir_trans_thresh = 0.05;         // meters: composition translation error threshold
+  double bidir_rot_thresh = 1.0;            // degrees: composition rotation error threshold
+
+  // VIO-distance depth prior gating
+  // Downweight depth priors where aligned mono inv_depth diverges from VIO inv_depth
+  // 0: disabled, 1: enabled
+  int vio_distance_gate = 1;
+  // Soft gate: weight = exp(-k * (ratio - 1)^2) where ratio = max(a/b, b/a)
+  double vio_distance_gate_k = 2.0;        // Sharpness (higher = stricter). 2.0 → ratio 2x gives w=0.13
+  double vio_distance_gate_min = 0.05;     // Floor weight (never fully zero)
 
   int diagnostics;
 

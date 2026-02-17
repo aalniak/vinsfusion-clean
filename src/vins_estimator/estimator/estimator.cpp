@@ -1007,7 +1007,7 @@ void Estimator::smartDepthInitialization() {
             scale_is_initialized = true;
         } else {
             // Lower alpha (0.15) because RANSAC can jump a bit more than LS
-            double alpha = 0.15; 
+            double alpha = 0.3; 
             cached_scale = (1.0 - alpha) * cached_scale + alpha * best_s;
             cached_shift = (1.0 - alpha) * cached_shift + alpha * best_t;
         }
@@ -1122,7 +1122,7 @@ void Estimator::smartDepthInitialization() {
           }
                     float d_mono_inv = depth_net_val;
                     if (d_mono_inv > sky_threshold) {
-                         double pred_inv_depth = cached_scale * d_mono_inv + cached_shift;
+                         double pred_inv_depth = depth_net_scales[first_frame_idx] * d_mono_inv + depth_net_shifts[first_frame_idx];
                          
                          if (pred_inv_depth > 0.01) { 
                              double new_depth = 1.0 / pred_inv_depth;
@@ -1317,7 +1317,8 @@ void Estimator::processImage(
                         
                         if (!raw_depth_518.empty()) {
                             cv::Mat resized_depth;
-                            cv::resize(raw_depth_518, resized_depth, cv::Size(params.col, params.row));
+                            // INTER_NEAREST avoids blurring inverse depth across edges
+                            cv::resize(raw_depth_518, resized_depth, cv::Size(params.col, params.row), 0, 0, cv::INTER_NEAREST);
                             frame.depth_map = resized_depth.clone();
                             
                             // Visualization
@@ -1452,12 +1453,24 @@ void Estimator::processImage(
   if (solver_flag == NON_LINEAR && photometricRefinement && marginalization_flag == MARGIN_OLD) {
       if (frame_count >= WINDOW_SIZE) {
           photometricRefinement->clearQueues();
-          submitPhotometricRefinement(6, 8);
-          submitPhotometricRefinement(8, 6);
-          submitPhotometricRefinement(7, 9);
-          submitPhotometricRefinement(8, 10);
+          // Check if tasks are meaningful before submitting (e.g. sufficient baseline)
+          //if (isTaskMeaningful(6, 8)) {
+          //submitPhotometricRefinement(6, 8);
+          //submitPhotometricRefinement(8, 6);
+          //} // redundant? usually one direction is enough or check both?
+          // Keeping consistent with user request to filter each submission.
           
-
+          if (isTaskMeaningful(8, 10)) {
+          submitPhotometricRefinement(8, 10);
+          submitPhotometricRefinement(10, 8);
+          }
+          
+          if (isTaskMeaningful(7, 9)) {
+          submitPhotometricRefinement(7, 9);
+          submitPhotometricRefinement(9, 7);
+          }
+          
+          // Debug: print if any were rejected? The function has internal debug print (commented out).
           
 
       }
@@ -1592,6 +1605,16 @@ void Estimator::processImage(
       TicToc t_depth_init;
       std::cout << "Before smart depth initialization: scale=" << cached_scale << ", shift=" << cached_shift << std::endl;
       smartDepthInitialization();
+      // Seed per-frame arrays from RANSAC global values (for frames still at identity)
+      if (scale_is_initialized) {
+          for (int i = 0; i <= WINDOW_SIZE; i++) {
+              if (std::abs(depth_net_scales[i] - 1.0) < 1e-6 &&
+                  std::abs(depth_net_shifts[i]) < 1e-6) {
+                  depth_net_scales[i] = cached_scale;
+                  depth_net_shifts[i] = cached_shift;
+              }
+          }
+      }
       ROS_INFO("smart depth initialization costs: %f ms", t_depth_init.toc());
     }
     
@@ -2577,8 +2600,10 @@ void Estimator::optimization() {
   // Aggregate statistics for variance gate debugging
   double debug_sum_var = 0.0;
   double debug_sum_gate = 0.0;
+  double debug_sum_vio_dist_w = 0.0;
   int debug_count_total = 0;
   int debug_count_rejected = 0;
+  int debug_vio_dist_downweighted = 0;
   // Temporal stability statistics for debugging
   int debug_temporal_candidates = 0;
   int debug_temporal_rejected = 0;
@@ -2792,8 +2817,9 @@ void Estimator::optimization() {
               float depth_consistency = min_val / (max_val + 1e-6f);
               
               if (depth_consistency > 0.7f) {  // Patch is relatively uniform
-                // Apply pre-computed global alignment
-                double aligned_inv_depth = cached_scale * mono_inv_depth + cached_shift;
+                // Apply per-frame alignment
+                int first_frame_idx = it_per_id.start_frame;
+                double aligned_inv_depth = depth_net_scales[first_frame_idx] * mono_inv_depth + depth_net_shifts[first_frame_idx];
                 
                 // ================================================================
                 // TEMPORAL STABILITY: Update depth history and check variance
@@ -2846,9 +2872,8 @@ void Estimator::optimization() {
                             float d_view_raw = patch_vals[patch_vals.size()/2];
                             
                             // 2. Reproject to Start Frame
-                            // 2. Reproject to Start Frame
                             // NOTE: d_view_raw is INVERSE DEPTH (Disparity)
-                            double d_view_inv = cached_scale * d_view_raw + cached_shift;
+                            double d_view_inv = depth_net_scales[view_frame_idx] * d_view_raw + depth_net_shifts[view_frame_idx];
                             
                             // Check for validity (must be positive)
                             if (d_view_inv < 1e-3) continue;
@@ -2867,16 +2892,18 @@ void Estimator::optimization() {
                             
                             if (P_start_cam.z() > 0.1) {
                                 double inv_d_start = 1.0 / P_start_cam.z();
-                                
-                                // DEBUG PRINT (Sampled)
-                                // DEBUG PRINT (Sampled)
-                                if (k == 1) { // Print only for one view per feature to avoid spam
-                                   //printf("MV SAMPLE: Feat %d | ViewFrame %d | Raw %.3f | Scale %.3f | InvAligned %.3f | Z_view %.3f | Z_start %.3f | InvD %.3f\n", 
-                                     //     it_per_id.feature_id, view_frame_idx, d_view_raw, cached_scale, d_view_inv, d_view_Z, P_start_cam.z(), inv_d_start);
-                                }
 
-                                // Add observation (uncertainty = 1.0 for now)
-                                it_per_id.addDepthObservation(inv_d_start, view_frame_idx, Ps[view_frame_idx], 1.0);
+                                // Compute observation uncertainty from baseline parallax
+                                // Larger baseline → more reliable triangulation → lower uncertainty
+                                double baseline = (Ps[view_frame_idx] - Ps[it_per_id.start_frame]).norm();
+                                double depth_at_view = 1.0 / d_view_inv;
+                                // Parallax in pixels: disparity = f * baseline / depth
+                                double parallax_px = (params.fx > 0 ? params.fx : 460.0) * baseline / (depth_at_view + 1e-3);
+                                // Uncertainty decreases with parallax: σ = 1/(1 + parallax/10)
+                                // At 10px parallax → σ=0.5, at 20px → σ=0.33, at 0px → σ=1.0
+                                double obs_uncertainty = 1.0 / (1.0 + parallax_px / 10.0);
+
+                                it_per_id.addDepthObservation(inv_d_start, view_frame_idx, Ps[view_frame_idx], obs_uncertainty);
                             }
                         }
                     }
@@ -2913,18 +2940,21 @@ void Estimator::optimization() {
                       // STRICT MODE: Only use mature features AND within 20m range
                       if (it_per_id.has_fused_depth && vins_metric_depth < 20.0) {
                           double weight = params.mv_depth_fusion_weight * WEIGHT;
-                          
-                          // DEBUG PRINT
-                          // printf("FUSION DEBUG: Feat %d | VIO %.3f | Fused %.3f | WEIGHT %.1f | FusionW %.1f | Var %.5f | SqrtInfo %.3f\n",
-                          //         it_per_id.feature_id, para_Feature[feature_index][0], it_per_id.fused_inv_depth, 
-                          //         WEIGHT, weight, it_per_id.fused_inv_depth_var, 
-                          //         1.0/std::sqrt(it_per_id.fused_inv_depth_var + 1e-8));
-                          
-                          
-                          ceres::CostFunction* f = WeightedFusedDepthFactor::Create(it_per_id.fused_inv_depth, 
+
+                          // Apply VIO-distance gate to fused depth too
+                          if (params.vio_distance_gate && it_per_id.fused_inv_depth > 1e-3) {
+                              double ratio_f = (vins_inv_depth > it_per_id.fused_inv_depth)
+                                               ? vins_inv_depth / it_per_id.fused_inv_depth
+                                               : it_per_id.fused_inv_depth / vins_inv_depth;
+                              double dev_f = ratio_f - 1.0;
+                              double w_f = std::exp(-params.vio_distance_gate_k * dev_f * dev_f);
+                              weight *= std::max(w_f, params.vio_distance_gate_min);
+                          }
+
+                          ceres::CostFunction* f = WeightedFusedDepthFactor::Create(it_per_id.fused_inv_depth,
                                                                                   it_per_id.fused_inv_depth_var,
                                                                                   weight);
-                          
+
                           // Oracle mode: Use dense depth for feature initialization,
                           // but skip adding optimization factors as they can degrade RMSE.
                           // ceres::ResidualBlockId block_id = problem.AddResidualBlock(f, loss_function, para_Feature[feature_index]);
@@ -3019,21 +3049,38 @@ void Estimator::optimization() {
                         // MAHALANOBIS CHECK
                         double mahal_weight_factor = 1.0;
                         double mahalanobis_dist = 0.0;
-                        
+
                         if (params.use_mahalanobis_weight) {
                           double inv_depth_error = vins_inv_depth - aligned_inv_depth;
                           double std_dev = std::sqrt(cached_inv_depth_variance);
                           mahalanobis_dist = std::abs(inv_depth_error - cached_inv_depth_mean_error) / (std_dev + 1e-8);
-                          
+
                           double k_mahal = 0.5;
                           mahal_weight_factor = std::exp(-k_mahal * mahalanobis_dist * mahalanobis_dist);
                           mahal_weight_factor = std::max(mahal_weight_factor, 0.1);
                           adaptive_weight *= mahal_weight_factor;
                         }
 
+                        // VIO-DISTANCE GATE: downweight priors where aligned mono depth
+                        // diverges from current VIO depth estimate
+                        double vio_dist_weight = 1.0;
+                        if (params.vio_distance_gate && aligned_inv_depth > 1e-3) {
+                          // Compute depth ratio (always >= 1.0)
+                          double ratio = (vins_inv_depth > aligned_inv_depth)
+                                         ? vins_inv_depth / aligned_inv_depth
+                                         : aligned_inv_depth / vins_inv_depth;
+                          // Soft exponential gate: ratio=1 → w=1, ratio=2 → w≈0.13 (k=2)
+                          double dev = ratio - 1.0;
+                          vio_dist_weight = std::exp(-params.vio_distance_gate_k * dev * dev);
+                          vio_dist_weight = std::max(vio_dist_weight, params.vio_distance_gate_min);
+                          adaptive_weight *= vio_dist_weight;
+                        }
+
 // Accumulate statistics for debugging
                         debug_sum_var += depth_var;
                         debug_sum_gate += variance_gate;
+                        debug_sum_vio_dist_w += vio_dist_weight;
+                        if (vio_dist_weight < 0.5) debug_vio_dist_downweighted++;
                         debug_count_total++;
                         
                         /* Single sample print removed to reduce spam, using aggregate at end */
@@ -3502,9 +3549,9 @@ void Estimator::optimization() {
   
   // Debug output
   if (added_depth_factors > 0) {
-    printf("\033[1;36m[Depth Opt] Added %d depth priors (s=%.3f, t=%.3f, w=%.2f, var=%.6f)\033[0m\n", 
-           added_depth_factors, cached_scale, cached_shift, 
-           WEIGHT, cached_inv_depth_variance);
+    printf("\033[1;36m[Depth Opt] Added %d depth priors (s=%.3f, t=%.3f, pf_s[0]=%.3f, w=%.2f, var=%.6f)\033[0m\n",
+           added_depth_factors, cached_scale, cached_shift,
+           depth_net_scales[0], WEIGHT, cached_inv_depth_variance);
   }
   
 
@@ -3512,8 +3559,9 @@ void Estimator::optimization() {
   if (debug_count_total > 0) {
       double avg_var = debug_sum_var / debug_count_total;
       double avg_gate = debug_sum_gate / debug_count_total;
-      printf("\033[1;33m[GATE SUMMARY] Features: %d | Avg Var: %.4f | Avg Gate: %.4f | Lambda: %.1f\033[0m\n", 
-             debug_count_total, avg_var, avg_gate, 1000.0);
+      double avg_vio_w = debug_sum_vio_dist_w / debug_count_total;
+      printf("\033[1;33m[GATE SUMMARY] N=%d | AvgVar=%.4f | AvgGate=%.4f | AvgVIOw=%.3f | VIOdown=%d\033[0m\n",
+             debug_count_total, avg_var, avg_gate, avg_vio_w, debug_vio_dist_downweighted);
   }
 
   added_depth_factors = 0; //Reset for next optimization call
@@ -3551,65 +3599,134 @@ void Estimator::optimization() {
   options.trust_region_strategy_type = ceres::DOGLEG;
 
   // [Refinement] Add Factors
-    std::cout << "[DEBUG] photometricRefinement exists: " << (photometricRefinement ? "YES" : "NO") << std::endl;
     if (photometricRefinement) {
-        RefinementResult res;
-        int result_count = 0;
-        // Consume all available results from the queue
-        while(photometricRefinement->getResult(res)) {
-            result_count++;
-            std::cout << "[DEBUG] Got result #" << result_count 
-                      << " | ref=" << res.timestamp_ref 
-                      << " cur=" << res.timestamp_cur 
-                      << " success=" << res.success << std::endl;
-            
-            // Find indices in current window
-            int idx_ref = -1, idx_cur = -1;
-            for (int i = 0; i <= WINDOW_SIZE; i++) {
-                if (std::abs(Headers[i] - res.timestamp_ref) < 1e-5) idx_ref = i;
-                if (std::abs(Headers[i] - res.timestamp_cur) < 1e-5) idx_cur = i;
-            }
-            
-            std::cout << "[DEBUG] idx_ref=" << idx_ref << " idx_cur=" << idx_cur << std::endl;
-            
-            if (idx_ref >= 0 && idx_cur >= 0 && res.success) {
-                // Info is 6x6. Need sqrt_info.
-                Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(res.information);
-                Eigen::Matrix<double, 6, 6> sqrt_info = llt.matrixL().transpose();
-                
-                // Refinement returns Camera Relative Pose (T_c_ref_c_cur)
-                // VINS RelativePoseFactor expects Body Relative Pose (T_b_ref_b_cur)
-                // T_b_ref_b_cur = T_b_c * T_c_ref_c_cur * T_c_b
-                
-                Eigen::Quaterniond q_c_ref_cur = res.q_ref_cur;
-                Eigen::Vector3d t_c_ref_cur = res.t_ref_cur;
-                
-                Eigen::Matrix3d R_b_c = params.ric[0];
-                Eigen::Vector3d t_b_c = params.tic[0];
-                
-                Eigen::Quaterniond Q_b_c(R_b_c);
-                Eigen::Quaterniond Q_c_b = Q_b_c.inverse();
-                Eigen::Vector3d t_c_b = -(Q_c_b * t_b_c);
-                
-                // T_b_ref_b_cur = T_b_c * (T_c_ref_c_cur * T_c_b)
-                Eigen::Quaterniond q_b_ref_cur = Q_b_c * q_c_ref_cur * Q_c_b;
-                Eigen::Vector3d t_b_ref_cur = Q_b_c * (q_c_ref_cur * t_c_b + t_c_ref_cur) + t_b_c;
+        // --- Phase 1: Drain all results and resolve window indices ---
+        struct ProcessedResult {
+            RefinementResult raw;
+            int idx_ref, idx_cur;
+            Eigen::Quaterniond q_b;    // body-frame relative rotation
+            Eigen::Vector3d t_b;       // body-frame relative translation
+            Eigen::Matrix<double, 6, 6> info;
+            double bidir_weight;       // 1.0 unless downweighted by consistency check
+        };
+        std::vector<ProcessedResult> results;
 
-                ceres::CostFunction* factor = new ceres::AutoDiffCostFunction<RelativePoseFactor, 6, 7, 7>(
-                     new RelativePoseFactor(t_b_ref_cur, q_b_ref_cur, sqrt_info));
-                    
-                problem.AddResidualBlock(factor, NULL, 
-                    para_Pose[idx_ref], para_Pose[idx_cur]);
+        {
+            RefinementResult res;
+            Eigen::Matrix3d R_b_c = params.ric[0];
+            Eigen::Vector3d t_b_c = params.tic[0];
+            Eigen::Quaterniond Q_b_c(R_b_c);
+            Eigen::Quaterniond Q_c_b = Q_b_c.inverse();
+            Eigen::Vector3d t_c_b = -(Q_c_b * t_b_c);
 
-                 ROS_INFO("[Refinement] Added Factor between Frame %d (%.3f) and %d (%.3f)", 
-                          idx_ref, res.timestamp_ref, idx_cur, res.timestamp_cur);
-            } else {
-                std::cout << "[DEBUG] Skipped: idx_ref=" << idx_ref 
-                          << " idx_cur=" << idx_cur 
-                          << " success=" << res.success << std::endl;
+            while (photometricRefinement->getResult(res)) {
+                int idx_ref = -1, idx_cur = -1;
+                for (int i = 0; i <= WINDOW_SIZE; i++) {
+                    if (std::abs(Headers[i] - res.timestamp_ref) < 1e-5) idx_ref = i;
+                    if (std::abs(Headers[i] - res.timestamp_cur) < 1e-5) idx_cur = i;
+                }
+                if (idx_ref < 0 || idx_cur < 0 || !res.success) continue;
+
+                // Camera → Body frame conversion
+                Eigen::Quaterniond q_b = Q_b_c * res.q_ref_cur * Q_c_b;
+                Eigen::Vector3d t_b = Q_b_c * (res.q_ref_cur * t_c_b + res.t_ref_cur) + t_b_c;
+                if (q_b.w() < 0) q_b.coeffs() = -q_b.coeffs();
+
+                ProcessedResult pr;
+                pr.raw = res;
+                pr.idx_ref = idx_ref;
+                pr.idx_cur = idx_cur;
+                pr.q_b = q_b;
+                pr.t_b = t_b;
+                pr.info = res.information;
+                pr.bidir_weight = 1.0;
+                results.push_back(pr);
             }
         }
-        // Debug print removed
+
+        // --- Phase 2: Bidirectional consistency check ---
+        if (params.bidir_consistency_mode > 0 && results.size() >= 2) {
+            // Find matching (i,j)/(j,i) pairs
+            std::vector<bool> matched(results.size(), false);
+
+            for (size_t a = 0; a < results.size(); a++) {
+                if (matched[a]) continue;
+                for (size_t b = a + 1; b < results.size(); b++) {
+                    if (matched[b]) continue;
+                    // Match: a=(i,j) with b=(j,i)
+                    if (results[a].idx_ref == results[b].idx_cur &&
+                        results[a].idx_cur == results[b].idx_ref) {
+                        matched[a] = matched[b] = true;
+
+                        // Compose T_ij * T_ji — should be identity
+                        // T_ij: q_a, t_a  |  T_ji: q_b, t_b
+                        Eigen::Quaterniond q_composed = results[a].q_b * results[b].q_b;
+                        Eigen::Vector3d t_composed = results[a].q_b * results[b].t_b + results[a].t_b;
+
+                        double trans_err = t_composed.norm();
+                        double rot_err = 2.0 * std::acos(std::min(1.0, std::abs(q_composed.w()))) * 180.0 / M_PI;
+
+                        bool consistent = (trans_err < params.bidir_trans_thresh &&
+                                           rot_err < params.bidir_rot_thresh);
+
+                        if (params.bidir_consistency_mode == 1) {
+                            // Mode 1: Reject inconsistent pairs
+                            if (!consistent) {
+                                results[a].bidir_weight = 0.0;
+                                results[b].bidir_weight = 0.0;
+                                printf("\033[1;31m[Bidir] REJECT (%d,%d): t_err=%.4f m, r_err=%.2f deg\033[0m\n",
+                                       results[a].idx_ref, results[a].idx_cur, trans_err, rot_err);
+                            } else {
+                                printf("\033[1;32m[Bidir] ACCEPT (%d,%d): t_err=%.4f m, r_err=%.2f deg\033[0m\n",
+                                       results[a].idx_ref, results[a].idx_cur, trans_err, rot_err);
+                            }
+                        } else if (params.bidir_consistency_mode == 2) {
+                            // Mode 2: Soft downweight by consistency
+                            double sigma_t = params.bidir_trans_thresh;
+                            double sigma_r = params.bidir_rot_thresh;
+                            double w = std::exp(-0.5 * (trans_err * trans_err / (sigma_t * sigma_t)
+                                                      + rot_err * rot_err / (sigma_r * sigma_r)));
+                            results[a].bidir_weight = w;
+                            results[b].bidir_weight = w;
+                            printf("[Bidir] WEIGHT (%d,%d): t_err=%.4f, r_err=%.2f -> w=%.3f\n",
+                                   results[a].idx_ref, results[a].idx_cur, trans_err, rot_err, w);
+                        }
+                        break; // found match for a
+                    }
+                }
+            }
+        }
+
+        // --- Phase 3: Add factors and update per-frame scale ---
+        for (auto& pr : results) {
+            if (pr.bidir_weight < 1e-6) continue; // rejected
+
+            // Scale information matrix by bidirectional consistency weight
+            Eigen::Matrix<double, 6, 6> scaled_info = pr.info * pr.bidir_weight;
+            Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(scaled_info);
+            Eigen::Matrix<double, 6, 6> sqrt_info = llt.matrixL().transpose();
+
+            // Per-frame scale/shift update
+            if (pr.raw.feature_count > 50 && pr.raw.scale > 0.1 && pr.raw.scale < 100.0) {
+                double alpha_ema = 0.5;
+                double old_scale = depth_net_scales[pr.idx_ref];
+                double old_shift = depth_net_shifts[pr.idx_ref];
+                depth_net_scales[pr.idx_ref] = (1.0 - alpha_ema) * old_scale + alpha_ema * pr.raw.scale;
+                depth_net_shifts[pr.idx_ref] = (1.0 - alpha_ema) * old_shift + alpha_ema * pr.raw.shift;
+                printf("[Estimator] Per-Frame Scale [%d]: %.4f -> %.4f (GN: %.4f) | Shift: %.4f -> %.4f\n",
+                       pr.idx_ref, old_scale, depth_net_scales[pr.idx_ref], pr.raw.scale,
+                       old_shift, depth_net_shifts[pr.idx_ref]);
+            }
+
+            // Add relative pose factor
+            ceres::CostFunction* factor = new ceres::AutoDiffCostFunction<RelativePoseFactor, 6, 7, 7>(
+                new RelativePoseFactor(pr.t_b, pr.q_b, sqrt_info));
+            problem.AddResidualBlock(factor, NULL, para_Pose[pr.idx_ref], para_Pose[pr.idx_cur]);
+
+            printf("[Refinement] Added Factor %d->%d (w=%.3f, cost: %.1f->%.1f, N=%d)\n",
+                   pr.idx_ref, pr.idx_cur, pr.bidir_weight,
+                   pr.raw.initial_cost, pr.raw.final_cost, pr.raw.feature_count);
+        }
     }
 
   options.max_num_iterations = params.num_iterations;
@@ -3951,10 +4068,16 @@ void Estimator::slideWindow() {
           Bas[i].swap(Bas[i + 1]);
           Bgs[i].swap(Bgs[i + 1]);
         }
+        // Slide per-frame scale/shift arrays
+        depth_net_scales[i] = depth_net_scales[i + 1];
+        depth_net_shifts[i] = depth_net_shifts[i + 1];
       }
       Headers[WINDOW_SIZE] = Headers[WINDOW_SIZE - 1];
       Ps[WINDOW_SIZE] = Ps[WINDOW_SIZE - 1];
       Rs[WINDOW_SIZE] = Rs[WINDOW_SIZE - 1];
+      // Initialize new slot with RANSAC global values
+      depth_net_scales[WINDOW_SIZE] = cached_scale;
+      depth_net_shifts[WINDOW_SIZE] = cached_shift;
 
       if (params.use_imu) {
         Vs[WINDOW_SIZE] = Vs[WINDOW_SIZE - 1];
@@ -4016,6 +4139,12 @@ void Estimator::slideWindow() {
         linear_acceleration_buf[WINDOW_SIZE].clear();
         angular_velocity_buf[WINDOW_SIZE].clear();
       }
+      // Slide per-frame scale/shift for MARGIN_SECOND_NEW
+      depth_net_scales[frame_count - 1] = depth_net_scales[frame_count];
+      depth_net_shifts[frame_count - 1] = depth_net_shifts[frame_count];
+      depth_net_scales[WINDOW_SIZE] = cached_scale;
+      depth_net_shifts[WINDOW_SIZE] = cached_shift;
+
       slideWindowNew();
     }
   }
@@ -4200,6 +4329,91 @@ void Estimator::updateLatestStates() {
 
 
 
+bool Estimator::isTaskMeaningful(int idx_ref, int idx_cur) {
+    if (idx_ref < 0 || idx_ref > WINDOW_SIZE || idx_cur < 0 || idx_cur > WINDOW_SIZE) return false;
+
+    // 1. Calculate Baseline (Camera Center Euclidean Distance)
+    // Ps are in World Frame.
+    Vector3d P_ref = Ps[idx_ref];
+    Vector3d P_cur = Ps[idx_cur];
+    double baseline = (P_ref - P_cur).norm();
+
+    // 2. Get Metric Depth Statistics
+    double t_ref = Headers[idx_ref];
+    
+    // Try to find depth map in all_image_frame or buffer
+    cv::Mat depth_map;
+    if (all_image_frame.count(t_ref)) {
+         depth_map = all_image_frame.at(t_ref).depth_map;
+    } else if (buffer_depths_.count(t_ref)) {
+         depth_map = buffer_depths_.at(t_ref);
+    }
+    
+    if (depth_map.empty()) {
+        // No depth map available to judge scale
+        return false;
+    }
+    
+    // Calculate Mean Metric Depth: mean(1 / (scale * inv_depth + shift))
+    // We sample the depth map to be fast.
+    double sum_metric_depth = 0;
+    int count = 0;
+    
+    // Stride for speed (sample every 10th pixel)
+    int stride = 10; 
+    
+    // Assume depth_map is CV_32F (float)
+    if (depth_map.type() != CV_32F) {
+        printf("[MeaningfulCheck] Depth map type mismatch (expected CV_32F)\n");
+        return false;
+    }
+
+    const float* ptr = (const float*)depth_map.data;
+    int total_pixels = depth_map.total();
+    
+    for (int i = 0; i < total_pixels; i += stride) {
+        float d_raw = ptr[i];
+        if (d_raw <= 1e-6) continue; // Invalid raw depth
+        
+        // Convert to Metric Inverse Depth (using per-frame scale/shift)
+        double d_metric_inv = depth_net_scales[idx_ref] * d_raw + depth_net_shifts[idx_ref];
+        
+        // Filter out points at infinity or behind camera
+        if (d_metric_inv > 1e-3) { 
+             sum_metric_depth += (1.0 / d_metric_inv);
+             count++;
+        }
+    }
+    
+    if (count < 100) return false; // Not enough valid depth points
+    
+    double mean_depth = sum_metric_depth / count;
+    
+    // Threshold formulation: Baseline > Ratio * MeanDepth
+    // Theoretically incorrect to use fixed ratio (0.02) across different lenses (FOV).
+    // Correct formulation: Minimum Observable Disparity (pixels).
+    // Disparity u = f * (Baseline / Depth)
+    // Baseline > (u_min / f) * Depth
+    
+    // We target a minimum average disparity of 10.0 pixels to ensure high SNR for photometric alignment.
+    // (2% of 500px focal length is 10px, so this matches the heuristic for VGA/400-600px cameras)
+    double min_disparity_px = 10.0;
+    double focal_length = 460.0; // Default fallback
+    if (params.fx > 0) focal_length = params.fx;
+    
+    double ratio_threshold = min_disparity_px / focal_length;
+    double min_baseline = ratio_threshold * mean_depth;
+    
+    bool meaningful = (baseline > min_baseline);
+    
+    if (!meaningful) {
+         printf("[MeaningfulCheck] REJECT %d->%d: Base=%.3f, MeanDepth=%.3f (Thresh=%.3f, Ratio=%.4f)\n", 
+               idx_ref, idx_cur, baseline, mean_depth, min_baseline, ratio_threshold);
+    } 
+
+    return meaningful;
+}
+
 void Estimator::submitPhotometricRefinement(int idx_ref, int idx_cur) {
     printf("[Refinement] Conditions met, checking frames %d and %d\n", idx_ref, idx_cur);
     
@@ -4268,9 +4482,15 @@ void Estimator::submitPhotometricRefinement(int idx_ref, int idx_cur) {
              K << params.fx, 0, params.cx,
                   0, params.fy, params.cy,
                   0, 0, 1;
+              // Submit raw depth + per-frame init scale/shift (both frames)
               cv::Mat depth = depth_ref.clone();
-              cv::Mat aligned_depth = depth * cached_scale + cached_shift;
-             photometricRefinement->submitTask(t_ref, t_cur, img_ref, img_cur, aligned_depth, K, q_initial, t_initial);
+              cv::Mat depth_cur_map;
+              if (all_image_frame.count(t_cur)) {
+                  depth_cur_map = all_image_frame.at(t_cur).depth_map;
+              }
+              photometricRefinement->submitTask(t_ref, t_cur, img_ref, img_cur, depth, depth_cur_map, K, q_initial, t_initial,
+                                                depth_net_scales[idx_ref], depth_net_shifts[idx_ref],
+                                                depth_net_scales[idx_cur], depth_net_shifts[idx_cur]);
          }
 }
     }
