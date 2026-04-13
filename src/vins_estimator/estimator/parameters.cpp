@@ -76,6 +76,12 @@ void Parameters::read_from_file(const std::string &config_file) {
   std::ofstream ffeature_debug(feature_debug_path, std::ios::out);
   ffeature_debug.close();
 
+  // Initialize covariance metrics CSV (cleared each run, header written on first dump)
+  std::string metrics_path = output_folder + "/covariance_metrics.csv";
+  std::ofstream fmetrics(metrics_path, std::ios::out);
+  fmetrics.close();
+  std::cout << "covariance metrics path " << metrics_path << std::endl;
+
   // check for feature_debug bool, if not exist, set to false
   if (!fsSettings["feature_debug"].empty()) {
     fsSettings["feature_debug"] >> feature_debug;

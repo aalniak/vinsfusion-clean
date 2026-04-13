@@ -215,13 +215,12 @@ class FeatureManager {
 
   list<FeaturePerId> feature;
   int last_track_num;
-
- private:
-  Parameters &params;
-
   double last_average_parallax;
   int new_feature_num;
   int long_track_num;
+
+ private:
+  Parameters &params;
   static double compensatedParallax2(const FeaturePerId &it_per_id,
                                      int frame_count);
   const Matrix3d *Rs;

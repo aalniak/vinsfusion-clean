@@ -1,0 +1,65 @@
+%YAML:1.0
+
+# Mono-only configuration (no IMU). Trajectory is recovered up-to-scale.
+# Adapted from euroc_mono_imu_config.yaml.
+
+#common parameters
+imu: 0
+num_of_cam: 1
+
+imu_topic: ""
+image0_topic: "/cam0/image_raw"
+image1_topic: "/cam1/image_raw"
+output_path: "~/output/"
+
+cam0_calib: "cam0_mei.yaml"
+cam1_calib: "cam1_mei.yaml"
+image_width: 752
+image_height: 480
+
+
+# Extrinsic parameter between IMU and Camera.
+# In mono-only mode there is no IMU; we treat the camera frame as the body frame
+# (identity), and parameters.cpp forces estimate_extrinsic = 0 when use_imu = 0.
+estimate_extrinsic: 0
+
+body_T_cam0: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 1, 0,
+          0, 0, 0, 1]
+
+#Multiple thread support
+multiple_thread: 1
+
+#feature traker paprameters
+max_cnt: 150            # max feature number in feature tracking
+min_dist: 30            # min distance between two features
+freq: 10                # frequence (Hz) of publish tracking result. At least 10Hz for good estimation. If set 0, the frequence will be same as raw image
+F_threshold: 1.0        # ransac threshold (pixel)
+show_track: 1           # publish tracking image as topic
+flow_back: 1            # perform forward and backward optical flow to improve feature tracking accuracy
+
+#optimization parameters
+max_solver_time: 0.04  # max solver itration time (ms), to guarantee real time
+max_num_iterations: 8   # max solver itrations, to guarantee real time
+keyframe_parallax: 10.0 # keyframe selection threshold (pixel)
+
+#imu parameters (unused when imu: 0, kept for parser compatibility)
+acc_n: 0.1
+gyr_n: 0.01
+acc_w: 0.001
+gyr_w: 0.0001
+g_norm: 9.81007
+
+#unsynchronization parameters
+estimate_td: 0
+td: 0.0
+
+#loop closure parameters
+load_previous_pose_graph: 0
+pose_graph_save_path: "~/output/pose_graph/"
+save_image: 1

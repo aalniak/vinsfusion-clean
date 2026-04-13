@@ -85,6 +85,7 @@ class Estimator {
   // internal
   void clearState();
   bool initialStructure();
+  bool monoInitialStructureNoIMU();
   bool visualInitialAlign();
   bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
   void slideWindow();
@@ -106,6 +107,7 @@ class Estimator {
                            Matrix3d &ricj, Vector3d &ticj, double depth,
                            Vector3d &uvi, Vector3d &uvj);
   void smartDepthInitialization();
+  void dumpCovarianceMetrics(double timestamp, bool is_keyframe);
   void updateLatestStates();
   void fastPredictIMU(double t, const Eigen::Vector3d &linear_acceleration,
                       const Eigen::Vector3d &angular_velocity);
@@ -202,6 +204,21 @@ class Estimator {
 
   map<double, ImageFrame> all_image_frame;
   IntegrationBase *tmp_pre_integration = nullptr;
+
+  // Solver summary cache (populated by optimization(), read by dumpCovarianceMetrics())
+  double last_solver_initial_cost = 0.0;
+  double last_solver_final_cost = 0.0;
+  int last_solver_iterations = 0;
+  bool last_solver_converged = false;
+  double last_solver_time_ms = 0.0;
+
+  // Pose covariance cache (6x6 tangent-space: [dx,dy,dz, dtheta_x,dtheta_y,dtheta_z])
+  // Populated by ceres::Covariance after optimization
+  bool last_covariance_valid = false;
+  bool last_covariance_marginal = false;  // true = Schur complement, false = conditional
+  double last_covariance_compute_ms = 0.0;
+  Eigen::Matrix<double, 6, 6> last_pose_covariance;       // Latest frame pose
+  Eigen::Matrix<double, 9, 9> last_speedbias_covariance;  // Latest frame speed+bias
 
   Eigen::Vector3d initP;
   Eigen::Matrix3d initR;

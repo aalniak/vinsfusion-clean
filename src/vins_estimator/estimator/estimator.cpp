@@ -291,9 +291,9 @@ void Estimator::setParameter() {
 void Estimator::changeSensorType(int use_imu, int use_stereo) {
   bool restart = false;
   mProcess.lock();
-  if (!use_imu && !use_stereo)
-    printf("at least use two sensors! \n");
-  else {
+  // Mono-only (!use_imu && !use_stereo) is allowed: trajectory is recovered
+  // up-to-scale via SfM-only initialization.
+  {
     if (params.use_imu != use_imu) {
       params.use_imu = use_imu;
       if (params.use_imu) {
@@ -1513,6 +1513,26 @@ void Estimator::processImage(
       }
     }
 
+    // monocular only initialization (no IMU). Trajectory is up-to-scale.
+    if (!params.stereo && !params.use_imu) {
+      if (frame_count == WINDOW_SIZE) {
+        bool result = false;
+        if ((header - initial_timestamp) > 0.1) {
+          result = monoInitialStructureNoIMU();
+          initial_timestamp = header;
+        }
+        if (result) {
+          optimization();
+          updateLatestStates();
+          solver_flag = NON_LINEAR;
+          slideWindow();
+          ROS_INFO("Initialization finish! (mono-only, up-to-scale)");
+        } else {
+          slideWindow();
+        }
+      }
+    }
+
     if (frame_count < WINDOW_SIZE) {
       frame_count++;
       int prev_frame = frame_count - 1;
@@ -1541,6 +1561,11 @@ void Estimator::processImage(
       ROS_INFO("smart depth initialization costs: %f ms", t_depth_init.toc());
     }
     optimization();
+
+    // Dump covariance/quality metrics after optimization
+    dumpCovarianceMetrics(Headers[frame_count],
+                          marginalization_flag == MARGIN_OLD);
+
     set<int> removeIndex;
     outliersRejection(removeIndex);
 
@@ -1782,6 +1807,137 @@ bool Estimator::visualInitialAlign() {
   f_manager.clearDepth();
   f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
 
+  return true;
+}
+
+// Mono-only (no IMU) initialization. Mirrors initialStructure() but:
+//  - skips the IMU excitation check,
+//  - omits the visualInitialAlign() step (no scale/gravity to recover),
+//  - leaves the world frame at the SfM frame (frame 'l' identity from
+//    GlobalSFM::construct), so the trajectory is recovered up-to-scale only.
+bool Estimator::monoInitialStructureNoIMU() {
+  TicToc t_sfm;
+
+  // Build SfM features from the sliding-window feature manager.
+  Quaterniond Q[frame_count + 1];
+  Vector3d T[frame_count + 1];
+  map<int, Vector3d> sfm_tracked_points;
+  vector<SFMFeature> sfm_f;
+  for (auto &it_per_id : f_manager.feature) {
+    int imu_j = it_per_id.start_frame - 1;
+    SFMFeature tmp_feature;
+    tmp_feature.state = false;
+    tmp_feature.id = it_per_id.feature_id;
+    for (auto &it_per_frame : it_per_id.feature_per_frame) {
+      imu_j++;
+      Vector3d pts_j = it_per_frame.point;
+      tmp_feature.observation.push_back(
+          make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
+    }
+    sfm_f.push_back(tmp_feature);
+  }
+
+  Matrix3d relative_R;
+  Vector3d relative_T;
+  int l;
+  if (!relativePose(relative_R, relative_T, l)) {
+    ROS_INFO("[mono-only] Not enough features or parallax; move the camera");
+    return false;
+  }
+
+  GlobalSFM sfm{params};
+  if (!sfm.construct(frame_count + 1, Q, T, l, relative_R, relative_T, sfm_f,
+                     sfm_tracked_points)) {
+    ROS_DEBUG("[mono-only] global SFM failed");
+    marginalization_flag = MARGIN_OLD;
+    return false;
+  }
+
+  // Solve PnP for non-keyframe images in all_image_frame, exactly as in the
+  // IMU path. This populates frame_it->second.{R,T} for use elsewhere even
+  // though we never call VisualIMUAlignment.
+  map<double, ImageFrame>::iterator frame_it;
+  map<int, Vector3d>::iterator it;
+  frame_it = all_image_frame.begin();
+  for (int i = 0; frame_it != all_image_frame.end(); frame_it++) {
+    cv::Mat r;
+    cv::Mat rvec;
+    cv::Mat t;
+    cv::Mat D;
+    cv::Mat tmp_r;
+    if ((frame_it->first) == Headers[i]) {
+      frame_it->second.is_key_frame = true;
+      frame_it->second.R = Q[i].toRotationMatrix() * params.ric[0].transpose();
+      frame_it->second.T = T[i];
+      i++;
+      continue;
+    }
+    if ((frame_it->first) > Headers[i]) {
+      i++;
+    }
+    Matrix3d R_inital = (Q[i].inverse()).toRotationMatrix();
+    Vector3d P_inital = -R_inital * T[i];
+    cv::eigen2cv(R_inital, tmp_r);
+    cv::Rodrigues(tmp_r, rvec);
+    cv::eigen2cv(P_inital, t);
+
+    frame_it->second.is_key_frame = false;
+    vector<cv::Point3f> pts_3_vector;
+    vector<cv::Point2f> pts_2_vector;
+    for (auto &id_pts : frame_it->second.points) {
+      int feature_id = id_pts.first;
+      for (auto &i_p : id_pts.second) {
+        it = sfm_tracked_points.find(feature_id);
+        if (it != sfm_tracked_points.end()) {
+          Vector3d world_pts = it->second;
+          cv::Point3f pts_3(world_pts(0), world_pts(1), world_pts(2));
+          pts_3_vector.push_back(pts_3);
+          Vector2d img_pts = i_p.second.head<2>();
+          cv::Point2f pts_2(img_pts(0), img_pts(1));
+          pts_2_vector.push_back(pts_2);
+        }
+      }
+    }
+    cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
+    if (pts_3_vector.size() < 6) {
+      ROS_DEBUG("[mono-only] not enough points for PnP (%zu)",
+                pts_3_vector.size());
+      return false;
+    }
+    if (!cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, true)) {
+      ROS_DEBUG("[mono-only] solve pnp fail");
+      return false;
+    }
+    cv::Rodrigues(rvec, r);
+    MatrixXd R_pnp;
+    MatrixXd tmp_R_pnp;
+    cv::cv2eigen(r, tmp_R_pnp);
+    R_pnp = tmp_R_pnp.transpose();
+    MatrixXd T_pnp;
+    cv::cv2eigen(t, T_pnp);
+    T_pnp = R_pnp * (-T_pnp);
+    frame_it->second.R = R_pnp * params.ric[0].transpose();
+    frame_it->second.T = T_pnp;
+  }
+
+  // Promote SfM result into the sliding-window state. With no IMU, body == cam
+  // (params.ric[0] == I in the supported configs), and we leave the world
+  // frame at whatever GlobalSFM produced — scale is unobservable.
+  for (int i = 0; i <= frame_count; i++) {
+    Rs[i] = Q[i].toRotationMatrix() * params.ric[0].transpose();
+    Ps[i] = T[i];
+    Vs[i].setZero();
+    Bas[i].setZero();
+    Bgs[i].setZero();
+    all_image_frame[Headers[i]].is_key_frame = true;
+  }
+
+  // Re-triangulate features in the new (metric-up-to-scale) world frame so
+  // that subsequent optimization() / outliersRejection() see consistent depths.
+  f_manager.clearDepth();
+  f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
+
+  ROS_INFO("[mono-only] SfM init succeeded in %.1f ms", t_sfm.toc());
   return true;
 }
 
@@ -3525,7 +3681,183 @@ void Estimator::optimization() {
   TicToc t_solver;
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
-  
+
+  // Cache solver summary for metric dumping
+  last_solver_initial_cost = summary.initial_cost;
+  last_solver_final_cost = summary.final_cost;
+  last_solver_iterations = static_cast<int>(summary.iterations.size());
+  last_solver_converged = (summary.termination_type == ceres::CONVERGENCE);
+  last_solver_time_ms = summary.total_time_in_seconds * 1000.0;
+
+  // --- Pose covariance extraction ---
+  // Keyframes:     full marginal covariance via Schur complement (features eliminated)
+  // Non-keyframes: fast conditional covariance (features treated as known)
+  {
+    TicToc t_cov;
+    last_covariance_valid = false;
+    const bool full_marginal = (marginalization_flag == MARGIN_OLD);
+    last_covariance_marginal = full_marginal;
+
+    // ---- Build ordered parameter block list: cameras first, then features ----
+    std::vector<double*> cam_blocks, feat_blocks;
+    int cam_tangent_dim = 0, feat_tangent_dim = 0;
+
+    // Pointers for feature range check (contiguous array)
+    const double* feat_begin = &para_Feature[0][0];
+    const double* feat_end   = &para_Feature[NUM_OF_F][0];
+
+    if (full_marginal) {
+      // Collect ALL parameter blocks from the problem, classified
+      std::vector<double*> all_blocks;
+      problem.GetParameterBlocks(&all_blocks);
+      for (double* block : all_blocks) {
+        int tsz = problem.ParameterBlockTangentSize(block);
+        if (block >= feat_begin && block < feat_end) {
+          feat_blocks.push_back(block);
+          feat_tangent_dim += tsz;
+        } else {
+          cam_blocks.push_back(block);
+          cam_tangent_dim += tsz;
+        }
+      }
+    } else {
+      // Fast path: only the latest frame's blocks
+      cam_blocks.push_back(para_Pose[frame_count]);
+      cam_tangent_dim += 6;
+      if (params.use_imu) {
+        cam_blocks.push_back(para_SpeedBias[frame_count]);
+        cam_tangent_dim += 9;
+      }
+    }
+
+    // ---- Evaluate Jacobian ----
+    ceres::Problem::EvaluateOptions eval_opts;
+    eval_opts.apply_loss_function = true;
+    // Order: cameras then features — so we know the column layout
+    eval_opts.parameter_blocks = cam_blocks;
+    eval_opts.parameter_blocks.insert(eval_opts.parameter_blocks.end(),
+                                      feat_blocks.begin(), feat_blocks.end());
+
+    ceres::CRSMatrix J_crs;
+    double cost;
+    if (problem.Evaluate(eval_opts, &cost, nullptr, nullptr, &J_crs)) {
+      const int nr = J_crs.num_rows;
+      const int nc_cam = cam_tangent_dim;
+      const int nc_feat = feat_tangent_dim;
+
+      if (full_marginal && nc_feat > 0) {
+        // ---- Schur complement: eliminate features ----
+        // Build H_cc (cam x cam), H_cf (cam x feat), H_ff_diag (feat x 1)
+        // Features are 1-D so H_ff is diagonal.
+        Eigen::MatrixXd H_cc = Eigen::MatrixXd::Zero(nc_cam, nc_cam);
+        Eigen::MatrixXd H_cf = Eigen::MatrixXd::Zero(nc_cam, nc_feat);
+        Eigen::VectorXd H_ff_diag = Eigen::VectorXd::Zero(nc_feat);
+
+        for (int r = 0; r < nr; r++) {
+          int start = J_crs.rows[r];
+          int end   = J_crs.rows[r + 1];
+          for (int a = start; a < end; a++) {
+            int ca = J_crs.cols[a];
+            double va = J_crs.values[a];
+            for (int b = a; b < end; b++) {
+              int cb = J_crs.cols[b];
+              double vb = J_crs.values[b];
+              double prod = va * vb;
+              bool a_cam = (ca < nc_cam), b_cam = (cb < nc_cam);
+              if (a_cam && b_cam) {
+                H_cc(ca, cb) += prod;
+                if (ca != cb) H_cc(cb, ca) += prod;
+              } else if (a_cam && !b_cam) {
+                H_cf(ca, cb - nc_cam) += prod;
+              } else if (!a_cam && b_cam) {
+                H_cf(cb, ca - nc_cam) += prod;
+              } else {
+                // Both feature — only diagonal (1-D features don't cross-couple)
+                if (ca == cb) H_ff_diag(ca - nc_cam) += prod;
+              }
+            }
+          }
+        }
+
+        // H_reduced = H_cc - H_cf * diag(1/H_ff) * H_cf^T
+        // Accumulate column-by-column to avoid building the full product
+        Eigen::MatrixXd H_reduced = H_cc;
+        for (int f = 0; f < nc_feat; f++) {
+          if (H_ff_diag(f) > 1e-20) {
+            H_reduced.noalias() -= (1.0 / H_ff_diag(f)) *
+                H_cf.col(f) * H_cf.col(f).transpose();
+          }
+        }
+
+        // Pseudo-invert the reduced camera Hessian
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(H_reduced);
+        const auto &ev = eig.eigenvalues();
+        double thresh = 1e-10 * ev.maxCoeff();
+        Eigen::VectorXd inv_ev(nc_cam);
+        for (int i = 0; i < nc_cam; i++)
+          inv_ev(i) = (ev(i) > thresh) ? 1.0 / ev(i) : 0.0;
+        Eigen::MatrixXd C_full = eig.eigenvectors() * inv_ev.asDiagonal()
+                                 * eig.eigenvectors().transpose();
+
+        // Find the column offset for the latest frame in cam_blocks
+        int offset = 0;
+        for (size_t i = 0; i < cam_blocks.size(); i++) {
+          if (cam_blocks[i] == para_Pose[frame_count]) break;
+          offset += problem.ParameterBlockTangentSize(cam_blocks[i]);
+        }
+        last_pose_covariance = C_full.block<6, 6>(offset, offset);
+
+        if (params.use_imu) {
+          int sb_offset = 0;
+          for (size_t i = 0; i < cam_blocks.size(); i++) {
+            if (cam_blocks[i] == para_SpeedBias[frame_count]) break;
+            sb_offset += problem.ParameterBlockTangentSize(cam_blocks[i]);
+          }
+          last_speedbias_covariance = C_full.block<9, 9>(sb_offset, sb_offset);
+        }
+        last_covariance_valid = true;
+
+      } else {
+        // ---- Fast conditional path (no features to eliminate) ----
+        Eigen::MatrixXd H = Eigen::MatrixXd::Zero(nc_cam, nc_cam);
+        Eigen::VectorXd row_vec(nc_cam);
+        for (int r = 0; r < nr; r++) {
+          row_vec.setZero();
+          for (int j = J_crs.rows[r]; j < J_crs.rows[r + 1]; j++)
+            row_vec(J_crs.cols[j]) = J_crs.values[j];
+          H.noalias() += row_vec * row_vec.transpose();
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(H);
+        const auto &ev = eig.eigenvalues();
+        double thresh = 1e-10 * ev.maxCoeff();
+        Eigen::VectorXd inv_ev(nc_cam);
+        for (int i = 0; i < nc_cam; i++)
+          inv_ev(i) = (ev(i) > thresh) ? 1.0 / ev(i) : 0.0;
+        Eigen::MatrixXd C = eig.eigenvectors() * inv_ev.asDiagonal()
+                            * eig.eigenvectors().transpose();
+
+        last_pose_covariance = C.block<6, 6>(0, 0);
+        if (params.use_imu && nc_cam >= 15)
+          last_speedbias_covariance = C.block<9, 9>(6, 6);
+        last_covariance_valid = true;
+      }
+    } else {
+      ROS_WARN("Covariance: problem.Evaluate failed");
+    }
+
+    last_covariance_compute_ms = t_cov.toc();
+    if (last_covariance_valid) {
+      double pos_std = std::sqrt(std::max(
+          last_pose_covariance(0,0) + last_pose_covariance(1,1) + last_pose_covariance(2,2), 0.0));
+      double rot_std = std::sqrt(std::max(
+          last_pose_covariance(3,3) + last_pose_covariance(4,4) + last_pose_covariance(5,5), 0.0));
+      ROS_INFO("[COV] %s %.1fms | pos_std=%.4f m | rot_std=%.4f rad",
+               full_marginal ? "MARGINAL" : "COND", last_covariance_compute_ms, pos_std, rot_std);
+    } else {
+      ROS_WARN("[COV] extraction failed (%.1fms)", last_covariance_compute_ms);
+    }
+  }
+
   // Evaluate per-group costs AFTER optimization
   // Re-enabled diagnostics per user request (currently commented out)
   //if (params.diagnostics) {
@@ -4078,6 +4410,244 @@ void Estimator::updateLatestStates() {
     tmp_gyrBuf.pop();
   }
   mPropagate.unlock();
+}
+
+void Estimator::dumpCovarianceMetrics(double timestamp, bool is_keyframe) {
+  std::string metrics_path = params.output_folder + "/covariance_metrics.csv";
+  // Write header on first call
+  {
+    std::ifstream test(metrics_path);
+    if (!test.good() || test.peek() == std::ifstream::traits_type::eof()) {
+      std::ofstream header_out(metrics_path, std::ios::out);
+      header_out << "timestamp,is_keyframe,frame_id,"
+                 << "reproj_error_mean,reproj_error_median,"
+                 << "feature_lifetime_mean,feature_lifetime_median,"
+                 << "num_tracked_features,num_new_features,survival_rate,"
+                 << "parallax_avg,"
+                 << "imu_bias_acc_norm,imu_bias_gyr_norm,imu_bias_acc_delta,imu_bias_gyr_delta,"
+                 << "optical_flow_mean,optical_flow_median,"
+                 << "depth_mean,depth_variance,num_triangulated,"
+                 << "solver_initial_cost,solver_final_cost,solver_iterations,solver_converged,solver_time_ms,"
+                 << "imu_visual_pos_disagreement,imu_visual_vel_disagreement,"
+                 << "cov_valid,cov_marginal,cov_compute_ms,"
+                 << "cov_pos_x,cov_pos_y,cov_pos_z,cov_pos_trace,"
+                 << "cov_rot_x,cov_rot_y,cov_rot_z,cov_rot_trace,"
+                 << "cov_vel_x,cov_vel_y,cov_vel_z,cov_vel_trace,"
+                 << "cov_ba_x,cov_ba_y,cov_ba_z,cov_ba_trace,"
+                 << "cov_bg_x,cov_bg_y,cov_bg_z,cov_bg_trace"
+                 << "\n";
+      header_out.close();
+    }
+  }
+
+  // --- 1. Reprojection Error (mean/median) ---
+  std::vector<double> reproj_errors;
+  for (auto &it_per_id : f_manager.feature) {
+    it_per_id.used_num = it_per_id.feature_per_frame.size();
+    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.estimated_depth <= 0) continue;
+
+    int imu_i = it_per_id.start_frame;
+    int imu_j = imu_i - 1;
+    Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+    double depth = it_per_id.estimated_depth;
+
+    for (auto &it_per_frame : it_per_id.feature_per_frame) {
+      imu_j++;
+      if (imu_i != imu_j) {
+        Vector3d pts_j = it_per_frame.point;
+        double err = reprojectionError(Rs[imu_i], Ps[imu_i], ric[0], tic[0],
+                                       Rs[imu_j], Ps[imu_j], ric[0], tic[0],
+                                       depth, pts_i, pts_j);
+        reproj_errors.push_back(err * params.focal_length);  // in pixels
+      }
+    }
+  }
+
+  double reproj_mean = 0.0, reproj_median = 0.0;
+  if (!reproj_errors.empty()) {
+    double sum = 0.0;
+    for (double e : reproj_errors) sum += e;
+    reproj_mean = sum / reproj_errors.size();
+    std::sort(reproj_errors.begin(), reproj_errors.end());
+    reproj_median = reproj_errors[reproj_errors.size() / 2];
+  }
+
+  // --- 2. Tracked Feature Lifetime (mean/median) ---
+  std::vector<double> lifetimes;
+  for (auto &it_per_id : f_manager.feature) {
+    lifetimes.push_back(static_cast<double>(it_per_id.feature_per_frame.size()));
+  }
+
+  double lifetime_mean = 0.0, lifetime_median = 0.0;
+  if (!lifetimes.empty()) {
+    double sum = 0.0;
+    for (double l : lifetimes) sum += l;
+    lifetime_mean = sum / lifetimes.size();
+    std::sort(lifetimes.begin(), lifetimes.end());
+    lifetime_median = lifetimes[lifetimes.size() / 2];
+  }
+
+  // --- 3. Survival Rate ---
+  int num_tracked = f_manager.last_track_num;
+  int total_input = num_tracked + f_manager.new_feature_num;
+  double survival_rate = (total_input > 0) ? static_cast<double>(num_tracked) / total_input : 0.0;
+
+  // --- 4. Average Parallax ---
+  double parallax_avg = f_manager.last_average_parallax;
+
+  // --- 5. IMU Bias Steadiness ---
+  // Current bias norms (latest frame in window)
+  double bias_acc_norm = Bas[frame_count].norm();
+  double bias_gyr_norm = Bgs[frame_count].norm();
+  // Delta between newest and second-newest frame in window
+  double bias_acc_delta = 0.0, bias_gyr_delta = 0.0;
+  if (frame_count > 0) {
+    bias_acc_delta = (Bas[frame_count] - Bas[frame_count - 1]).norm();
+    bias_gyr_delta = (Bgs[frame_count] - Bgs[frame_count - 1]).norm();
+  }
+
+  // --- 6. Optical Flow (mean/median) ---
+  // Optical flow magnitude from feature velocity field at the latest frame
+  std::vector<double> flow_mags;
+  for (auto &it_per_id : f_manager.feature) {
+    int latest_idx = static_cast<int>(it_per_id.feature_per_frame.size()) - 1;
+    if (latest_idx < 0) continue;
+    // Only features visible in the current frame
+    if (it_per_id.start_frame + latest_idx != frame_count) continue;
+    const auto &fpf = it_per_id.feature_per_frame[latest_idx];
+    double mag = fpf.velocity.norm();
+    flow_mags.push_back(mag);
+  }
+
+  double flow_mean = 0.0, flow_median = 0.0;
+  if (!flow_mags.empty()) {
+    double sum = 0.0;
+    for (double f : flow_mags) sum += f;
+    flow_mean = sum / flow_mags.size();
+    std::sort(flow_mags.begin(), flow_mags.end());
+    flow_median = flow_mags[flow_mags.size() / 2];
+  }
+
+  // --- 7. Triangulated Depth Variance ---
+  std::vector<double> depths;
+  for (auto &it_per_id : f_manager.feature) {
+    if (it_per_id.estimated_depth > 0) {
+      depths.push_back(it_per_id.estimated_depth);
+    }
+  }
+
+  double depth_mean = 0.0, depth_var = 0.0;
+  int num_triangulated = static_cast<int>(depths.size());
+  if (!depths.empty()) {
+    double sum = 0.0;
+    for (double d : depths) sum += d;
+    depth_mean = sum / depths.size();
+    double var_sum = 0.0;
+    for (double d : depths) var_sum += (d - depth_mean) * (d - depth_mean);
+    depth_var = var_sum / depths.size();
+  }
+
+  // --- 8. Solver Convergence (already cached) ---
+
+  // --- 9. IMU-Visual Agreement ---
+  // Compare IMU-predicted state vs optimized state for the latest frame
+  double imu_visual_pos_dis = 0.0;
+  double imu_visual_vel_dis = 0.0;
+  if (params.use_imu && frame_count > 0 && pre_integrations[frame_count] &&
+      pre_integrations[frame_count]->sum_dt < 10.0) {
+    // IMU-predicted position from previous frame
+    double dt = pre_integrations[frame_count]->sum_dt;
+    Vector3d imu_pred_p = Ps[frame_count - 1] + dt * Vs[frame_count - 1]
+                          + 0.5 * dt * dt * g
+                          + Rs[frame_count - 1] * pre_integrations[frame_count]->delta_p;
+    Vector3d imu_pred_v = Vs[frame_count - 1] + dt * g
+                          + Rs[frame_count - 1] * pre_integrations[frame_count]->delta_v;
+
+    imu_visual_pos_dis = (imu_pred_p - Ps[frame_count]).norm();
+    imu_visual_vel_dis = (imu_pred_v - Vs[frame_count]).norm();
+  }
+
+  // --- Write CSV row ---
+  std::ofstream fout(metrics_path, std::ios::app);
+  fout.setf(std::ios::fixed, std::ios::floatfield);
+  fout.precision(9);
+  fout << timestamp << ","
+       << (is_keyframe ? 1 : 0) << ","
+       << inputImageCnt << ",";
+  fout.precision(6);
+  fout << reproj_mean << "," << reproj_median << ","
+       << lifetime_mean << "," << lifetime_median << ","
+       << num_tracked << "," << f_manager.new_feature_num << "," << survival_rate << ","
+       << parallax_avg << ","
+       << bias_acc_norm << "," << bias_gyr_norm << ","
+       << bias_acc_delta << "," << bias_gyr_delta << ","
+       << flow_mean << "," << flow_median << ","
+       << depth_mean << "," << depth_var << "," << num_triangulated << ",";
+  fout.precision(8);
+  fout << last_solver_initial_cost << "," << last_solver_final_cost << ","
+       << last_solver_iterations << "," << (last_solver_converged ? 1 : 0) << ","
+       << last_solver_time_ms << ",";
+  fout.precision(6);
+  fout << imu_visual_pos_dis << "," << imu_visual_vel_dis << ",";
+
+  // --- 10. Pose Covariance from ceres::Covariance ---
+  fout << (last_covariance_valid ? 1 : 0) << ","
+       << (last_covariance_marginal ? 1 : 0) << ","
+       << last_covariance_compute_ms << ",";
+  if (last_covariance_valid) {
+    // Position std deviations (diagonal of 3x3 position block)
+    double cov_px = last_pose_covariance(0, 0);
+    double cov_py = last_pose_covariance(1, 1);
+    double cov_pz = last_pose_covariance(2, 2);
+    fout << std::sqrt(std::max(cov_px, 0.0)) << ","
+         << std::sqrt(std::max(cov_py, 0.0)) << ","
+         << std::sqrt(std::max(cov_pz, 0.0)) << ","
+         << std::sqrt(std::max(cov_px + cov_py + cov_pz, 0.0)) << ",";
+    // Rotation std deviations (diagonal of 3x3 rotation block)
+    double cov_rx = last_pose_covariance(3, 3);
+    double cov_ry = last_pose_covariance(4, 4);
+    double cov_rz = last_pose_covariance(5, 5);
+    fout << std::sqrt(std::max(cov_rx, 0.0)) << ","
+         << std::sqrt(std::max(cov_ry, 0.0)) << ","
+         << std::sqrt(std::max(cov_rz, 0.0)) << ","
+         << std::sqrt(std::max(cov_rx + cov_ry + cov_rz, 0.0)) << ",";
+
+    if (params.use_imu) {
+      // Velocity std deviations [indices 0-2 of SpeedBias]
+      double cov_vx = last_speedbias_covariance(0, 0);
+      double cov_vy = last_speedbias_covariance(1, 1);
+      double cov_vz = last_speedbias_covariance(2, 2);
+      fout << std::sqrt(std::max(cov_vx, 0.0)) << ","
+           << std::sqrt(std::max(cov_vy, 0.0)) << ","
+           << std::sqrt(std::max(cov_vz, 0.0)) << ","
+           << std::sqrt(std::max(cov_vx + cov_vy + cov_vz, 0.0)) << ",";
+      // Accel bias std deviations [indices 3-5 of SpeedBias]
+      double cov_bax = last_speedbias_covariance(3, 3);
+      double cov_bay = last_speedbias_covariance(4, 4);
+      double cov_baz = last_speedbias_covariance(5, 5);
+      fout << std::sqrt(std::max(cov_bax, 0.0)) << ","
+           << std::sqrt(std::max(cov_bay, 0.0)) << ","
+           << std::sqrt(std::max(cov_baz, 0.0)) << ","
+           << std::sqrt(std::max(cov_bax + cov_bay + cov_baz, 0.0)) << ",";
+      // Gyro bias std deviations [indices 6-8 of SpeedBias]
+      double cov_bgx = last_speedbias_covariance(6, 6);
+      double cov_bgy = last_speedbias_covariance(7, 7);
+      double cov_bgz = last_speedbias_covariance(8, 8);
+      fout << std::sqrt(std::max(cov_bgx, 0.0)) << ","
+           << std::sqrt(std::max(cov_bgy, 0.0)) << ","
+           << std::sqrt(std::max(cov_bgz, 0.0)) << ","
+           << std::sqrt(std::max(cov_bgx + cov_bgy + cov_bgz, 0.0));
+    } else {
+      // No IMU: fill velocity and bias columns with 0
+      fout << "0,0,0,0,0,0,0,0,0,0,0,0";
+    }
+  } else {
+    // Covariance invalid: fill 5 groups x 4 values = 20 data columns with 0
+    fout << "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0";
+  }
+  fout << "\n";
+  fout.close();
 }
 
 }  // namespace vins::estimator
