@@ -24,10 +24,13 @@
 #include <cstdio>
 #include <eigen3/Eigen/Dense>
 #include <opencv2/opencv.hpp>
+
+#ifdef VINS_WITH_OPENCV_CUDA
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/cudaoptflow.hpp>
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudaarithm.hpp>
+#endif
 
 using namespace std;
 using namespace camodocal;
@@ -84,7 +87,9 @@ class FeatureTrackerKLT {
   cv::Mat mask_;
   cv::Mat fisheye_mask_;
   cv::Mat prev_img_, cur_img_;
-    //add gpu-specific items
+
+#ifdef VINS_WITH_OPENCV_CUDA
+  // GPU-specific items for the OpenCV CUDA tracker path.
   cv::Ptr<cv::cuda::SparsePyrLKOpticalFlow> gpu_lk_tracker;
   cv::Ptr<cv::cuda::CornersDetector> gpu_detector;
   
@@ -104,6 +109,7 @@ class FeatureTrackerKLT {
   cv::cuda::HostMem mem_reverse_status;
   cv::Mat cpu_cur_img_view;           // CPU way to see image
   cv::cuda::GpuMat gpu_cur_img_view;  // GPU way to see image
+#endif
 
   vector<cv::Point2f> predict_pts_;
   vector<cv::Point2f> predict_pts_debug_;

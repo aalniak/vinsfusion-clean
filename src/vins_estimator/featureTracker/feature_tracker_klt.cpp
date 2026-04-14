@@ -11,7 +11,11 @@
  *******************************************************/
 
 #include <vins_estimator/featureTracker/feature_tracker_klt.h>
+
+#ifdef VINS_WITH_OPENCV_CUDA
 #include <cuda_runtime.h>
+#endif
+
 namespace vins::estimator {
 bool ready = false;
 bool FeatureTrackerKLT::inBorder(const cv::Point2f &pt) const {
@@ -46,6 +50,7 @@ void reduceVector(vector<int> &v, vector<uchar> status) {
 FeatureTrackerKLT::FeatureTrackerKLT(Parameters &params)
     : params(params), stereo_cam_(false), has_prediction_(false)
 {
+#ifdef VINS_WITH_OPENCV_CUDA
     if (params.use_cuda_in_tracking){
     gpu_lk_tracker = cv::cuda::SparsePyrLKOpticalFlow::create(
         cv::Size(21, 21), 3, 30, true);
@@ -62,6 +67,12 @@ FeatureTrackerKLT::FeatureTrackerKLT(Parameters &params)
     gpu_cur_img_view = mem_cur_img.createGpuMatHeader();
     //cv::cuda::HostMem shared_img_mem(HEIGHT, WIDTH, CV_8UC1, cv::cuda::HostMem::SHARED);
     }
+#else
+    if (params.use_cuda_in_tracking) {
+      ROS_WARN("OpenCV CUDA tracking requested but OpenCV was built without the required cudaoptflow/cudaimgproc/cudaarithm modules. Falling back to CPU KLT.");
+      params.use_cuda_in_tracking = 0;
+    }
+#endif
 }
 
 void FeatureTrackerKLT::setMask() {
@@ -348,6 +359,10 @@ FeatureTrackerKLT::trackImage(double _cur_time, const cv::Mat &_img,
 map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
 FeatureTrackerKLT::trackImageCUDA(double _cur_time, const cv::Mat &_img,
                            const cv::Mat &_img1) {
+#ifndef VINS_WITH_OPENCV_CUDA
+    ROS_WARN_ONCE("OpenCV CUDA tracking is unavailable in this build. Falling back to CPU KLT.");
+    return trackImage(_cur_time, _img, _img1);
+#else
     TicToc t_r;
     cur_time_ = _cur_time;
     cur_img_ = _img;
@@ -633,11 +648,17 @@ FeatureTrackerKLT::trackImageCUDA(double _cur_time, const cv::Mat &_img,
     }
     printf("feature track whole time %f\n", t_r.toc());
     return featureFrame;
+#endif
 }
 
 map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
 FeatureTrackerKLT::trackImageVecCUDA(double _cur_time, const cv::Mat &_img, const cv::Mat &depth,
                            const cv::Mat &_img1) {
+#ifndef VINS_WITH_OPENCV_CUDA
+    updateDepth(depth);
+    ROS_WARN_ONCE("Vectorized OpenCV CUDA tracking is unavailable in this build. Falling back to CPU KLT.");
+    return trackImage(_cur_time, _img, _img1);
+#else
     TicToc t_r;
     cur_time_ = _cur_time;
     cur_img_ = _img;
@@ -925,6 +946,7 @@ FeatureTrackerKLT::trackImageVecCUDA(double _cur_time, const cv::Mat &_img, cons
     }
     printf("feature track whole time %f\n", t_r.toc());
     return featureFrame;
+#endif
 }
 
 

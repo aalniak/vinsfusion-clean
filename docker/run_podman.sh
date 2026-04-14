@@ -18,4 +18,4 @@ podman run \
     -v "$1:/datasets/" \
     ros:vins-fusion \
     /bin/bash -c \
-    "cd /root/catkin_ws/; source devel/setup.bash; bash"
+    "export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin:/opt/venv/bin; export CMAKE_PREFIX_PATH=/opt/ros/noetic; export OpenCV_DIR=/usr/local/lib/cmake/opencv4; cd /root/catkin_ws/; source /opt/ros/noetic/setup.bash; if [ -f devel/setup.bash ]; then source devel/setup.bash; fi; bash"

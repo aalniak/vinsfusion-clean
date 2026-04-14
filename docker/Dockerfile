@@ -11,8 +11,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ROS_DISTRO=noetic \
     ROS_INSTALL_PREFIX=/opt/ros/noetic \
     VENV_PATH=/opt/venv \
-    # Make venv take precedence and avoid user-site leakage (mismatch cause)
-    PATH=/opt/venv/bin:$PATH \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin:/opt/venv/bin \
+    CMAKE_PREFIX_PATH=/opt/ros/noetic \
+    OpenCV_DIR=/usr/local/lib/cmake/opencv4 \
     PYTHONNOUSERSITE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -66,7 +67,9 @@ RUN set -euo pipefail; \
 # Build Noetic from source with the jammy fixes (rosconsole / urdf branches)
 RUN set -euo pipefail; \
     mkdir -p ~/ros_catkin_ws/src && cd ~/ros_catkin_ws; \
-    rosinstall_generator desktop --rosdistro ${ROS_DISTRO} --deps --tar > noetic-desktop.rosinstall; \
+    rosinstall_generator \
+      desktop ros_comm common_msgs image_common vision_opencv tf \
+      --rosdistro ${ROS_DISTRO} --deps --tar > noetic-desktop.rosinstall; \
     vcs import --input noetic-desktop.rosinstall ./src; \
     # Remove upstream rosconsole/urdf to replace with patched branches
     cd ~/ros_catkin_ws/src; \
@@ -83,7 +86,20 @@ RUN set -euo pipefail; \
     /usr/bin/python3 ./src/catkin/bin/catkin_make_isolated \
       --install --install-space ${ROS_INSTALL_PREFIX} \
       -DCMAKE_BUILD_TYPE=Release \
-      -DPYTHON_EXECUTABLE=/usr/bin/python3
+      -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+      -DOpenCV_DIR=/usr/local/lib/cmake/opencv4
+
+# Fail the image build early if the source-built ROS install is incomplete.
+RUN test -f ${ROS_INSTALL_PREFIX}/share/catkin/cmake/catkinConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/roscpp/cmake/roscppConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/std_msgs/cmake/std_msgsConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/geometry_msgs/cmake/geometry_msgsConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/nav_msgs/cmake/nav_msgsConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/sensor_msgs/cmake/sensor_msgsConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/tf/cmake/tfConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/cv_bridge/cmake/cv_bridgeConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/image_transport/cmake/image_transportConfig.cmake && \
+    test -f ${ROS_INSTALL_PREFIX}/share/message_generation/cmake/message_generationConfig.cmake
 
 # Make ROS env available in shells
 RUN echo "source ${ROS_INSTALL_PREFIX}/setup.bash" > /etc/profile.d/ros-noetic.sh
@@ -149,18 +165,27 @@ WORKDIR /root/catkin_ws
 RUN bash -lc '\
   source /etc/profile.d/ros-noetic.sh && \
   mkdir -p ~/catkin_ws/src && cd ~/catkin_ws && \
-  catkin init && \
-  catkin config --extend /opt/ros/noetic --merge-devel && \
-  catkin config --cmake-args -DPYTHON_EXECUTABLE=/usr/bin/python3 -DPython3_EXECUTABLE=/usr/bin/python3 \
+  /usr/bin/catkin init && \
+  /usr/bin/catkin config --extend /opt/ros/noetic --merge-devel && \
+  /usr/bin/catkin config --cmake-args \
+    -DCMAKE_PREFIX_PATH=/opt/ros/noetic \
+    -Dcatkin_DIR=/opt/ros/noetic/share/catkin/cmake \
+    -DOpenCV_DIR=/usr/local/lib/cmake/opencv4 \
+    -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+    -DPython3_EXECUTABLE=/usr/bin/python3 \
 '
+
+# Base image inherits /opt/venv/bin ahead of /usr/bin. Keep the venv available,
+# but make sure catkin resolves the system toolchain first.
+RUN bash -lc 'test "$(command -v cmake)" = "/usr/bin/cmake" && test "$(command -v python3)" = "/usr/bin/python3"'
 
 # Copy our Jetson-friendly requirements into the image
 COPY docker/depth_requirements.txt /tmp/requirements.txt
 # Install them into the venv (VENV_PATH=/opt/venv from above)
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
-    pip install torch && \
-    pip uninstall -y empy em && \
-    pip install catkin_pkg "empy<4" rospkg
+RUN "${VENV_PATH}/bin/pip" install --no-cache-dir -r /tmp/requirements.txt && \
+    "${VENV_PATH}/bin/pip" install torch && \
+    "${VENV_PATH}/bin/pip" uninstall -y empy em && \
+    "${VENV_PATH}/bin/pip" install catkin_pkg "empy<4" rospkg
 
 # Install tensorrt and torch2trt externally
 RUN apt-get update && apt-get install -y gnupg wget && \
@@ -182,6 +207,6 @@ RUN apt-get update && \
 #    python3 -m pip install . --no-build-isolation && \
 #    cd .. && \
 #    rm -rf torch2trt
-RUN pip install evo
+RUN "${VENV_PATH}/bin/pip" install evo
 WORKDIR /root/catkin_ws
 CMD ["/bin/bash"]

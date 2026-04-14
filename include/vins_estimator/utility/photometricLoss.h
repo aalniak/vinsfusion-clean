@@ -14,11 +14,14 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
+#include <Eigen/Dense>
+
+#ifdef VINS_WITH_OPENCV_CUDA
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudaarithm.hpp>
 #include <opencv2/cudawarping.hpp>
-#include <Eigen/Dense>
+#endif
 
 namespace vins::estimator {
 
@@ -51,6 +54,7 @@ public:
         double ssim_weight = 0.85,
         double l1_weight = 0.15);
 
+#ifdef VINS_WITH_OPENCV_CUDA
     /**
      * GPU-accelerated version of compute().
      * Uses cv::cuda for warping and loss computation.
@@ -63,6 +67,7 @@ public:
         const Eigen::Matrix4d& T_target_src,
         double ssim_weight = 0.85,
         double l1_weight = 0.15);
+#endif
 
     /**
      * Compute SSIM between two images (CPU version).
@@ -247,6 +252,7 @@ inline double PhotometricLoss::compute(
     return ssim_weight * ssim_loss + l1_weight * l1_loss;
 }
 
+#ifdef VINS_WITH_OPENCV_CUDA
 inline double PhotometricLoss::computeGPU(
     const cv::Mat& img_src_cpu,           // Keep on CPU (Static reference)
     const cv::cuda::GpuMat& img_target_gpu, // Keep on GPU (Target to be warped)
@@ -293,5 +299,6 @@ inline double PhotometricLoss::computeGPU(
     
     return ssim_weight * ssim_loss + l1_weight * l1_loss;
 }
+#endif
 
 }  // namespace vins::estimator

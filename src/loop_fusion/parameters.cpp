@@ -88,6 +88,7 @@ void Parameters::read_from_file(const std::string &config_file) {
   }
 
   num_of_cam = fsSettings["num_of_cam"];
+  stereo = 0;
   printf("camera number %d\n", num_of_cam);
 
   if (num_of_cam != 1 && num_of_cam != 2) {

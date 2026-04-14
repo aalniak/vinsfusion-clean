@@ -59,6 +59,31 @@ struct DepthPriorFactor
     }
 };
 
+struct TranslationNormFactor
+{
+    const double target_norm;
+    const double sqrt_info;
+
+    TranslationNormFactor(double target_norm, double weight)
+        : target_norm(target_norm), sqrt_info(weight) {}
+
+    template <typename T>
+    bool operator()(const T* const pose_i, const T* const pose_j, T* residuals) const
+    {
+        const T dx = pose_j[0] - pose_i[0];
+        const T dy = pose_j[1] - pose_i[1];
+        const T dz = pose_j[2] - pose_i[2];
+        const T baseline = ceres::sqrt(dx * dx + dy * dy + dz * dz + T(1e-12));
+        residuals[0] = T(sqrt_info) * (baseline - T(target_norm));
+        return true;
+    }
+
+    static ceres::CostFunction* Create(double target_norm, double weight) {
+        return new ceres::AutoDiffCostFunction<TranslationNormFactor, 1, 7, 7>(
+            new TranslationNormFactor(target_norm, weight));
+    }
+};
+
 // Legacy factor with per-frame scale/shift (kept for reference, but not recommended)
 struct VioDisparityModelFactor
 {
@@ -291,26 +316,23 @@ void Estimator::setParameter() {
 void Estimator::changeSensorType(int use_imu, int use_stereo) {
   bool restart = false;
   mProcess.lock();
-  if (!use_imu && !use_stereo)
-    printf("at least use two sensors! \n");
-  else {
-    if (params.use_imu != use_imu) {
-      params.use_imu = use_imu;
-      if (params.use_imu) {
-        // reuse imu; restart system
-        restart = true;
-      } else {
-        delete last_marginalization_info;
+  if (params.use_imu != use_imu) {
+    params.use_imu = use_imu;
+    if (params.use_imu) {
+      // reuse imu; restart system
+      restart = true;
+    } else {
+      delete last_marginalization_info;
+      delete tmp_pre_integration;
 
-        tmp_pre_integration = nullptr;
-        last_marginalization_info = nullptr;
-        last_marginalization_parameter_blocks.clear();
-      }
+      tmp_pre_integration = nullptr;
+      last_marginalization_info = nullptr;
+      last_marginalization_parameter_blocks.clear();
+      ROS_INFO("switching to vision-only mode");
     }
-
-    params.stereo = use_stereo;
-    printf("use imu %d use stereo %d\n", params.use_imu, params.stereo);
   }
+  params.stereo = use_stereo;
+  printf("use imu %d use stereo %d\n", params.use_imu, params.stereo);
   mProcess.unlock();
   if (restart) {
     clearState();
@@ -1386,7 +1408,7 @@ void Estimator::processImage(
     }
   Headers[frame_count] = header;
   ImageFrame imageframe(image, header);
-  imageframe.pre_integration = tmp_pre_integration;
+  imageframe.pre_integration = params.use_imu ? tmp_pre_integration : nullptr;
   
   // Attach raw image for photometric loss computation and ordinal constraint debugging
   if (params.photometric_reg || params.ordinal_depth || params.use_depth) {
@@ -1409,10 +1431,14 @@ void Estimator::processImage(
   auto insertion_result = all_image_frame.insert(make_pair(header, imageframe));
   auto& map_frame_ref = insertion_result.first->second;
   //all_image_frame.insert(make_pair(header, imageframe));
-  tmp_pre_integration = new IntegrationBase{
-      acc_0,        gyr_0,        Bas[frame_count], Bgs[frame_count],
-      params.acc_n, params.gyr_n, params.acc_w,     params.gyr_w,
-      params.g};
+  if (params.use_imu) {
+    tmp_pre_integration = new IntegrationBase{
+        acc_0,        gyr_0,        Bas[frame_count], Bgs[frame_count],
+        params.acc_n, params.gyr_n, params.acc_w,     params.gyr_w,
+        params.g};
+  } else {
+    tmp_pre_integration = nullptr;
+  }
   
   if (!current_depth.empty()) {
         map_frame_ref.depth_map = current_depth.clone();
@@ -1470,6 +1496,26 @@ void Estimator::processImage(
           ROS_INFO("Initialization finish!");
         } else
           slideWindow();
+      }
+    }
+
+    // monocular only initialization
+    if (!params.stereo && !params.use_imu) {
+      if (frame_count == WINDOW_SIZE) {
+        bool result = false;
+        if ((header - initial_timestamp) > 0.1) {
+          result = initialStructure();
+          initial_timestamp = header;
+        }
+        if (result) {
+          optimization();
+          updateLatestStates();
+          solver_flag = NON_LINEAR;
+          slideWindow();
+          ROS_INFO("Monocular-only initialization finish!");
+        } else {
+          slideWindow();
+        }
       }
     }
 
@@ -1599,7 +1645,7 @@ void Estimator::processImage(
 bool Estimator::initialStructure() {
   TicToc t_sfm;
   // check imu observibility
-  {
+  if (params.use_imu) {
     map<double, ImageFrame>::iterator frame_it;
     Vector3d sum_g;
     for (frame_it = all_image_frame.begin(), frame_it++;
@@ -1723,9 +1769,23 @@ bool Estimator::initialStructure() {
     frame_it->second.R = R_pnp * params.ric[0].transpose();
     frame_it->second.T = T_pnp;
   }
-  if (visualInitialAlign()) return true;
-  ROS_INFO("misalign visual structure with IMU");
-  return false;
+  if (params.use_imu) {
+    if (visualInitialAlign()) return true;
+    ROS_INFO("misalign visual structure with IMU");
+    return false;
+  }
+
+  for (int i = 0; i <= frame_count; i++) {
+    Matrix3d Ri = all_image_frame[Headers[i]].R;
+    Vector3d Pi = all_image_frame[Headers[i]].T;
+    Ps[i] = Pi;
+    Rs[i] = Ri;
+    all_image_frame[Headers[i]].is_key_frame = true;
+  }
+
+  f_manager.clearDepth();
+  f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
+  return true;
 }
 
 bool Estimator::visualInitialAlign() {
@@ -2457,6 +2517,13 @@ void Estimator::optimization() {
       problem.AddParameterBlock(para_SpeedBias[i], SIZE_SPEEDBIAS);
   }
   if (!params.use_imu) problem.SetParameterBlockConstant(para_Pose[0]);
+  if (!params.use_imu && !params.stereo && frame_count > 0) {
+    const double current_baseline = std::max((Ps[1] - Ps[0]).norm(), 1e-3);
+    ceres::CostFunction *visual_scale_anchor =
+        TranslationNormFactor::Create(current_baseline, 1.0);
+    problem.AddResidualBlock(visual_scale_anchor, nullptr, para_Pose[0],
+                             para_Pose[1]);
+  }
 
   for (int i = 0; i < params.num_of_cam; i++) {
     ceres::Manifold *manifold = new PoseManifold();
@@ -3629,6 +3696,15 @@ void Estimator::optimization() {
             vector<int>{0, 1});
         marginalization_info->addResidualBlockInfo(residual_block_info);
       }
+    }
+    if (!params.use_imu && !params.stereo) {
+      const double current_baseline = std::max((Ps[1] - Ps[0]).norm(), 1e-3);
+      ceres::CostFunction *visual_scale_anchor =
+          TranslationNormFactor::Create(current_baseline, 1.0);
+      ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(
+          visual_scale_anchor, NULL, vector<double *>{para_Pose[0], para_Pose[1]},
+          vector<int>{0});
+      marginalization_info->addResidualBlockInfo(residual_block_info);
     }
 
     {

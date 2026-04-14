@@ -50,7 +50,13 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
 )
 
-find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc video videoio cudaoptflow cudaimgproc cudaarithm)
+if (NOT OpenCV_DIR AND EXISTS "/usr/local/lib/cmake/opencv4/OpenCVConfig.cmake")
+  set(OpenCV_DIR "/usr/local/lib/cmake/opencv4" CACHE PATH "Preferred OpenCV config path")
+endif()
+
+find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc video videoio)
+message(STATUS "   [VINS] OpenCV_DIR: ${OpenCV_DIR}")
+message(STATUS "   [VINS] OpenCV_VERSION: ${OpenCV_VERSION}")
 find_package(Ceres REQUIRED)
 message(STATUS "------------------------------------------------")
 message(STATUS "   CERES FOUND VERSION: ${Ceres_VERSION}")
@@ -68,6 +74,24 @@ else()
     message(WARNING "   [VINS] Old Ceres detected. CUDA Solver disabled.")
 endif()
 find_package(Eigen3 REQUIRED)
+
+set(VINS_WITH_OPENCV_CUDA ON)
+set(VINS_OPENCV_CUDA_LIBS)
+foreach(module IN ITEMS cudaoptflow cudaimgproc cudaarithm cudawarping)
+  if (TARGET opencv_${module})
+    list(APPEND VINS_OPENCV_CUDA_LIBS opencv_${module})
+  else()
+    set(VINS_WITH_OPENCV_CUDA OFF)
+  endif()
+endforeach()
+
+if (VINS_WITH_OPENCV_CUDA)
+  add_definitions(-DVINS_WITH_OPENCV_CUDA)
+  message(STATUS "   [VINS] OpenCV CUDA modules found. CUDA feature tracking enabled.")
+else()
+  set(VINS_OPENCV_CUDA_LIBS)
+  message(WARNING "   [VINS] OpenCV CUDA modules not found. Falling back to CPU feature tracking and CPU photometric loss.")
+endif()
 
 ## Include directories
 include_directories(
@@ -158,6 +182,7 @@ add_dependencies(vins_node ${catkin_EXPORTED_TARGETS}) ##to ensure required head
 target_link_libraries(vins_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
+  ${VINS_OPENCV_CUDA_LIBS}
   ${CERES_LIBRARIES}
   ${CUDAToolkit_LIBRARIES}
   ${TENSORRT_LIB}
@@ -194,6 +219,7 @@ add_executable(
 target_link_libraries(loop_fusion_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
+  ${VINS_OPENCV_CUDA_LIBS}
   ${CERES_LIBRARIES}
   ${CUDAToolkit_LIBRARIES}
   ${TENSORRT_LIB}
@@ -223,4 +249,3 @@ install(DIRECTORY launch/
 install(PROGRAMS scripts/depth.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
-

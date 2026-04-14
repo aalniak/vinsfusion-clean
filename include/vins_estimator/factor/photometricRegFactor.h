@@ -13,7 +13,6 @@
 
 #include <ceres/ceres.h>
 #include <Eigen/Dense>
-#include <opencv2/core/cuda.hpp>
 #include <vins_estimator/utility/photometricLoss.h>
 
 namespace vins::estimator {
@@ -22,7 +21,11 @@ struct PhotometricRegFactor {
     // Hybrid storage for optimal performance
     cv::Mat img_src_cpu;           // Reference image on CPU (for loss calc)
     cv::Mat depth_src_cpu;         // Depth on CPU (for map generation)
+#ifdef VINS_WITH_OPENCV_CUDA
     cv::cuda::GpuMat img_tgt_gpu;  // Target image on GPU (source for warping)
+#else
+    cv::Mat img_tgt_cpu;
+#endif
     
     Eigen::Matrix3d K;
     double weight;
@@ -44,7 +47,11 @@ struct PhotometricRegFactor {
              
              img_src_cpu = img_src_small;
              depth_src_cpu = depth_src_small;
+#ifdef VINS_WITH_OPENCV_CUDA
              img_tgt_gpu.upload(img_tgt_small);
+#else
+             img_tgt_cpu = img_tgt_small;
+#endif
              
              // Scale Intrinsics
              K = K * scale_factor;
@@ -55,7 +62,11 @@ struct PhotometricRegFactor {
              depth_src_cpu = depth_src.clone();
              
              // Upload target image to GPU once (it stays static, only warp maps change)
+#ifdef VINS_WITH_OPENCV_CUDA
              img_tgt_gpu.upload(img_tgt);
+#else
+             img_tgt_cpu = img_tgt.clone();
+#endif
          }
     }
 
@@ -83,9 +94,15 @@ struct PhotometricRegFactor {
          T_tgt_src.block<3,1>(0,3) = t_rel;
          
          // Compute Loss using optimized Hybrid CPU/GPU method
+#ifdef VINS_WITH_OPENCV_CUDA
          double loss = PhotometricLoss::computeGPU(
              img_src_cpu, img_tgt_gpu, depth_src_cpu, 
              K, T_tgt_src, ssim_weight, l1_weight);
+#else
+         double loss = PhotometricLoss::compute(
+             img_src_cpu, img_tgt_cpu, depth_src_cpu,
+             K, T_tgt_src, ssim_weight, l1_weight);
+#endif
          
          residuals[0] = weight * loss;
          return true;

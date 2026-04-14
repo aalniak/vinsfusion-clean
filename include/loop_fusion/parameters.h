@@ -68,8 +68,8 @@ struct Parameters {
   int row, col;
   double td;
   int num_of_cam;
-  int stereo;
-  int use_imu;
+  int stereo = 0;
+  int use_imu = 0;
   int multiple_thread;
 
   std::string netvlad_engine_path;
