@@ -1834,7 +1834,7 @@ void Estimator::vector2double() {
       para_SpeedBias[i][2] = Vs[i].z();
 
       para_SpeedBias[i][3] = Bas[i].x();
-      para_SpeedBias[i][4] = Bas[i].x();
+      para_SpeedBias[i][4] = Bas[i].y();
       para_SpeedBias[i][5] = Bas[i].z();
 
       para_SpeedBias[i][6] = Bgs[i].x();
