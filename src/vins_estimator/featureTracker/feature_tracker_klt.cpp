@@ -12,6 +12,11 @@
 
 #include <vins_estimator/featureTracker/feature_tracker_klt.h>
 #include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <utility>
 namespace vins::estimator {
 bool ready = false;
 bool FeatureTrackerKLT::inBorder(const cv::Point2f &pt) const {
@@ -149,6 +154,9 @@ FeatureTrackerKLT::trackImage(double _cur_time, const cv::Mat &_img,
   */
   cur_pts_.clear();
 
+  // Extract XFeat for this frame (+ optional LighterGlue-guided KLT init).
+  extractAndGuide();
+
   if (prev_pts_.size() > 0) {
     TicToc t_o;
     vector<uchar> status;
@@ -197,6 +205,11 @@ FeatureTrackerKLT::trackImage(double _cur_time, const cv::Mat &_img,
       std::cout << "time it takes for reverse optical flow: " << t_o.toc() << " ms" << std::endl;
     }
 
+    // Recover KLT-lost tracks via LighterGlue, then drop appearance-drifted tracks,
+    // before culling (both no-ops unless their params are enabled).
+    recoverLostTracks(status);
+    cleanDriftedTracks(status);
+
     for (int i = 0; i < static_cast<int>(cur_pts_.size()); i++)
       if (status[i] && !inBorder(cur_pts_[i])) status[i] = 0;
     reduceVector(prev_pts_, status);
@@ -224,14 +237,20 @@ FeatureTrackerKLT::trackImage(double _cur_time, const cv::Mat &_img,
       if (mask_.empty()) cout << "mask is empty " << endl;
       if (mask_.type() != CV_8UC1) cout << "mask type wrong " << endl;
 
-      vector<cv::Point2f> n_pts;
-      n_pts.reserve(n_max_cnt);
-      cv::goodFeaturesToTrack(cur_img_, n_pts, n_max_cnt, 0.01,
-                              params.min_dist, mask_);
-      for (auto &p : n_pts) {
-        cur_pts_.push_back(p);
-        ids_.push_back(IdCounter::get());
-        track_cnt_.push_back(1);
+      if (params.xfeat_enable && xfeat_) {
+        // Hybrid: seed new features from XFeat (same as the CUDA path) so the
+        // hybrid works even with use_cuda_in_tracking:0.
+        detectNewFeatures(n_max_cnt);
+      } else {
+        vector<cv::Point2f> n_pts;
+        n_pts.reserve(n_max_cnt);
+        cv::goodFeaturesToTrack(cur_img_, n_pts, n_max_cnt, 0.01,
+                                params.min_dist, mask_);
+        for (auto &p : n_pts) {
+          cur_pts_.push_back(p);
+          ids_.push_back(IdCounter::get());
+          track_cnt_.push_back(1);
+        }
       }
     }
 
@@ -361,6 +380,9 @@ FeatureTrackerKLT::trackImageCUDA(double _cur_time, const cv::Mat &_img,
     // We do this ONCE at the start so both tracking and detection can use it
     d_cur_img.upload(cur_img_);
 
+    // Extract XFeat for this frame (+ optional LighterGlue-guided KLT init).
+    extractAndGuide();
+
     if (prev_pts_.size() > 0) {
         TicToc t_o;
         vector<uchar> status;
@@ -446,15 +468,23 @@ FeatureTrackerKLT::trackImageCUDA(double _cur_time, const cv::Mat &_img,
              status = tmp_status;
         }
 
+        // Recover KLT-lost tracks via LighterGlue, then drop appearance-drifted tracks,
+        // before culling (both no-ops unless their params are enabled).
+        recoverLostTracks(status);
+        cleanDriftedTracks(status);
+
         for (int i = 0; i < static_cast<int>(cur_pts_.size()); i++)
             if (status[i] && !inBorder(cur_pts_[i])) status[i] = 0;
-            
+
         reduceVector(prev_pts_, status);
         reduceVector(cur_pts_, status);
         reduceVector(ids_, status);
         reduceVector(track_cnt_, status);
         ROS_INFO("temporal optical flow costs: %fms", t_o.toc());
     }
+
+    // NOTE: rejectWithF() here hurt accuracy on MH_04 (RANSAC-F at 1px on
+    // forward/near-planar motion culls good tracks -> shorter tracks). Left off.
 
     for (auto &n : track_cnt_) n++;
 
@@ -471,27 +501,32 @@ FeatureTrackerKLT::trackImageCUDA(double _cur_time, const cv::Mat &_img,
         // [GPU] 5. Feature Detection
         if (n_max_cnt > 0) {
             if (mask_.empty()) cout << "mask is empty " << endl;
-            TicToc t_detect;
-            // Upload mask to GPU
-            d_mask.upload(mask_);
+            if (params.xfeat_enable && xfeat_) {
+                // Hybrid: seed new features from XFeat keypoints (KLT then tracks them).
+                detectNewFeatures(n_max_cnt);
+            } else {
+                TicToc t_detect;
+                // Upload mask to GPU
+                d_mask.upload(mask_);
 
-            // Run GPU Detector (Shi-Tomasi)
-            // Note: createGoodFeaturesToTrackDetector was set with max_cnt in constructor.
-            // If n_max_cnt varies wildly, you might get more points than needed, 
-            // but we filter them in the loop below anyway.
-            gpu_detector->detect(d_cur_img, d_new_pts, d_mask);
+                // Run GPU Detector (Shi-Tomasi)
+                // Note: createGoodFeaturesToTrackDetector was set with max_cnt in constructor.
+                // If n_max_cnt varies wildly, you might get more points than needed,
+                // but we filter them in the loop below anyway.
+                gpu_detector->detect(d_cur_img, d_new_pts, d_mask);
 
-            if (!d_new_pts.empty()) {
-                vector<cv::Point2f> n_pts(d_new_pts.cols);
-                cv::Mat n_pts_mat(1, d_new_pts.cols, CV_32FC2, (void*)&n_pts[0]);
-                d_new_pts.download(n_pts_mat);
-                //ROS_INFO("GPU Detection Time: %f ms", t_detect.toc());
-                // Add new points to main list
-                for (auto &p : n_pts) {
-                    if (cur_pts_.size() >= params.max_cnt) break; // formatting safety
-                    cur_pts_.push_back(p);
-                    ids_.push_back(IdCounter::get());
-                    track_cnt_.push_back(1);
+                if (!d_new_pts.empty()) {
+                    vector<cv::Point2f> n_pts(d_new_pts.cols);
+                    cv::Mat n_pts_mat(1, d_new_pts.cols, CV_32FC2, (void*)&n_pts[0]);
+                    d_new_pts.download(n_pts_mat);
+                    //ROS_INFO("GPU Detection Time: %f ms", t_detect.toc());
+                    // Add new points to main list
+                    for (auto &p : n_pts) {
+                        if (cur_pts_.size() >= params.max_cnt) break; // formatting safety
+                        cur_pts_.push_back(p);
+                        ids_.push_back(IdCounter::get());
+                        track_cnt_.push_back(1);
+                    }
                 }
             }
         }
@@ -956,7 +991,9 @@ void FeatureTrackerKLT::rejectWithF() {
     int size_a = cur_pts_.size();
     reduceVector(prev_pts_, status);
     reduceVector(cur_pts_, status);
-    reduceVector(cur_un_pts_, status);
+    // cur_un_pts_ may be stale here (recomputed after detection); only reduce if
+    // it currently corresponds to cur_pts_.
+    if (cur_un_pts_.size() == status.size()) reduceVector(cur_un_pts_, status);
     reduceVector(ids_, status);
     reduceVector(track_cnt_, status);
     ROS_DEBUG("FM ransac: %d -> %lu: %f", size_a, cur_pts_.size(),
@@ -973,6 +1010,283 @@ void FeatureTrackerKLT::readIntrinsicParameter(const vector<string> &calib_file)
     m_camera_.push_back(camera);
   }
   if (calib_file.size() == 2) stereo_cam_ = true;
+
+  if (params.xfeat_enable) {
+    ROS_INFO("KLT hybrid: seeding new features with XFeat (%s)",
+             params.xfeat_engine_path.c_str());
+    xfeat_ = std::make_unique<XFeatTRT>(params.xfeat_engine_path);
+    if ((params.xfeat_guided_init || params.xfeat_recover) &&
+        !params.xfeat_lighterglue_engine_path.empty()) {
+      ROS_INFO("KLT hybrid: LighterGlue (%s) [guided_init=%d recover=%d]",
+               params.xfeat_lighterglue_engine_path.c_str(), params.xfeat_guided_init,
+               params.xfeat_recover);
+      lighterglue_ =
+          std::make_unique<LighterGlueTRT>(params.xfeat_lighterglue_engine_path);
+      if (lighterglue_->numKpts() != xfeat_->topK()) {
+        std::cerr << "[XFeat] guided-init LighterGlue N (" << lighterglue_->numKpts()
+                  << ") != XFeat top_k (" << xfeat_->topK()
+                  << "); disabling guided init." << std::endl;
+        lighterglue_.reset();
+      }
+    }
+  }
+}
+
+// Run XFeat once for this frame (reused for new-feature seeding) and, if guided
+// init is enabled, compute a LighterGlue-homography prediction for KLT.
+void FeatureTrackerKLT::extractAndGuide() {
+  if (!(params.xfeat_enable && xfeat_)) return;
+  // Drop drift anchors for tracks that no longer exist (keep the map bounded).
+  if (params.xfeat_clean && !ref_desc_.empty()) {
+    std::unordered_set<int> live(ids_.begin(), ids_.end());
+    for (auto it = ref_desc_.begin(); it != ref_desc_.end();) {
+      if (live.find(it->first) == live.end())
+        it = ref_desc_.erase(it);
+      else
+        ++it;
+    }
+  }
+  // Promote the previous frame's extraction (still in cur_xf_ from last call).
+  if (cur_xf_.n > 0) {
+    prev_xf_ = std::move(cur_xf_);
+    prev_xf_valid_ = true;
+  }
+  cur_xf_ = xfeat_->run(cur_img_);
+  matched_src_.clear();
+  matched_dst_.clear();
+  // LighterGlue is only needed by guided-init and track-recovery. Descriptor cleaning
+  // is XFeat-only (reuses cur_xf_), so skip the matcher entirely when neither is on --
+  // the default hybrid (+ optional cleaning) then runs no LighterGlue at all.
+  if (lighterglue_ && prev_xf_valid_ &&
+      (params.xfeat_guided_init || params.xfeat_recover)) {
+    matchPrevCur();  // shared by guided-init and track-recovery
+    if (params.xfeat_guided_init && !prev_pts_.empty()) {
+      if (computeGuidedPrediction()) has_prediction_ = true;
+    }
+  }
+}
+
+// Confident prev<->cur LighterGlue matches (src=prev kpt, dst=cur kpt).
+void FeatureTrackerKLT::matchPrevCur() {
+  LGMatches m = lighterglue_->run(prev_xf_.keypoints, prev_xf_.descriptors,
+                                  cur_xf_.keypoints, cur_xf_.descriptors);
+  matched_src_.reserve(256);
+  matched_dst_.reserve(256);
+  for (int i = 0; i < m.n; ++i) {
+    int j = m.matches0[i];
+    if (j < 0 || j >= cur_xf_.n) continue;
+    if (m.mscores0[i] < 0.5f) continue;
+    matched_src_.push_back(prev_xf_.keypoints[i]);
+    matched_dst_.push_back(cur_xf_.keypoints[j]);
+  }
+}
+
+// Recover tracks KLT lost this frame (status==0) by borrowing the local flow of a
+// nearby confident LighterGlue match: cur = q + (dst - src). This applies a REAL
+// match's displacement to the track's true previous endpoint q (correct flow, unlike
+// snapping to the match's own destination, which injects up to `radius` px of error).
+// The borrow is only trusted where the LOCAL flow field is uniform: the nearest
+// match's flow is validated against other confident matches within radius, and
+// rejected if a majority of neighbours disagree by more than `flow_tol` px (parallax,
+// repetitive texture, or wrong-depth -> the constant-flow assumption is invalid). A
+// loose per-frame volume cap guards only catastrophic frames.
+int FeatureTrackerKLT::recoverLostTracks(std::vector<uchar> &status) {
+  if (!params.xfeat_recover || matched_src_.empty()) return 0;
+  const float R2 = params.xfeat_recover_radius * params.xfeat_recover_radius;
+  const float ftol2 = params.xfeat_recover_flow_tol * params.xfeat_recover_flow_tol;
+  struct Cand { size_t k; float d2; cv::Point2f cur; };
+  std::vector<Cand> cands;
+  for (size_t k = 0; k < status.size() && k < prev_pts_.size(); ++k) {
+    if (status[k]) continue;  // KLT already tracks this point well
+    const cv::Point2f &q = prev_pts_[k];
+    int bi = -1;
+    float best = R2;
+    for (size_t i = 0; i < matched_src_.size(); ++i) {
+      float dx = matched_src_[i].x - q.x, dy = matched_src_[i].y - q.y;
+      float d2 = dx * dx + dy * dy;
+      if (d2 < best) { best = d2; bi = static_cast<int>(i); }
+    }
+    if (bi < 0) continue;  // no confident match within radius
+    const cv::Point2f f0(matched_dst_[bi].x - matched_src_[bi].x,
+                         matched_dst_[bi].y - matched_src_[bi].y);
+    // Local flow-consistency check: do neighbouring matches move the same way?
+    int total = 0, agree = 0;
+    for (size_t i = 0; i < matched_src_.size(); ++i) {
+      if (static_cast<int>(i) == bi) continue;
+      float dx = matched_src_[i].x - q.x, dy = matched_src_[i].y - q.y;
+      if (dx * dx + dy * dy > R2) continue;
+      total++;
+      float ex = (matched_dst_[i].x - matched_src_[i].x) - f0.x;
+      float ey = (matched_dst_[i].y - matched_src_[i].y) - f0.y;
+      if (ex * ex + ey * ey <= ftol2) agree++;
+    }
+    if (total >= 2 && agree * 2 < total) continue;  // nearest flow contradicted -> skip
+    cv::Point2f p(q.x + f0.x, q.y + f0.y);
+    if (!inBorder(p)) continue;
+    cands.push_back({k, best, p});
+  }
+  if (cands.empty()) return 0;
+  // Volume gate: a frame that lost most of its tracks is degraded; mass recovery
+  // would flood the estimator with correlated guesses. Keep the closest (best
+  // evidence) candidates up to a fraction of the live-track budget.
+  size_t cap = static_cast<size_t>(params.xfeat_recover_max_ratio *
+                                   static_cast<float>(status.size()));
+  if (cap < 1) cap = 1;
+  if (cands.size() > cap) {
+    std::nth_element(cands.begin(), cands.begin() + cap, cands.end(),
+                     [](const Cand &a, const Cand &b) { return a.d2 < b.d2; });
+    cands.resize(cap);
+  }
+  for (const auto &c : cands) {
+    cur_pts_[c.k] = c.cur;
+    status[c.k] = 1;
+  }
+  ROS_INFO("XFeat recovered %d KLT-lost tracks (flow-validated)",
+           static_cast<int>(cands.size()));
+  return static_cast<int>(cands.size());
+}
+
+// Drop tracks whose appearance JUMPED this frame -> KLT likely snapped to a wrong
+// feature. Each track keeps a reference XFeat descriptor that ROLLS forward every frame;
+// we compare it to the descriptor of the nearest CURRENT XFeat keypoint (a proxy for the
+// descriptor at the tracked sub-pixel point -- only sparse keypoints exist, not a dense
+// map). A large per-frame cosine drop = sudden appearance change = bad jump -> drop;
+// otherwise roll the reference to the current descriptor so slow LEGITIMATE drift
+// (viewpoint/illumination over a long track) never accumulates into a false drop. (The
+// birth-anchor variant did accumulate -> killed good long tracks -> diverged on stairs.)
+// Logs cosine min/mean so the threshold can be set from data. Untouched if no keypoint
+// within radius (cannot evaluate). Improves track QUALITY, complementary to recovery.
+void FeatureTrackerKLT::cleanDriftedTracks(std::vector<uchar> &status) {
+  if (!params.xfeat_clean || cur_xf_.n == 0 || ref_desc_.empty()) return;
+  const float R2 = params.xfeat_clean_radius * params.xfeat_clean_radius;
+  int dropped = 0, evaluated = 0;
+  float cmin = 1.0f, csum = 0.0f;
+  for (size_t k = 0; k < status.size() && k < cur_pts_.size() && k < ids_.size(); ++k) {
+    if (!status[k]) continue;  // already lost this frame; nothing to clean
+    auto it = ref_desc_.find(ids_[k]);
+    if (it == ref_desc_.end()) continue;  // no reference (e.g. seeded before clean on)
+    const cv::Point2f &p = cur_pts_[k];
+    int bi = -1;
+    float best = R2;
+    for (int i = 0; i < cur_xf_.n; ++i) {
+      float dx = cur_xf_.keypoints[i].x - p.x, dy = cur_xf_.keypoints[i].y - p.y;
+      float d2 = dx * dx + dy * dy;
+      if (d2 < best) { best = d2; bi = i; }
+    }
+    if (bi < 0) continue;  // no current keypoint near the track -> cannot evaluate
+    const float *d = &cur_xf_.descriptors[bi * 64];
+    float cos = 0.0f;
+    for (int c = 0; c < 64; ++c) cos += it->second[c] * d[c];  // L2-normalized -> dot = cosine
+    evaluated++;
+    csum += cos;
+    if (cos < cmin) cmin = cos;
+    if (cos < params.xfeat_clean_thr) {
+      status[k] = 0;  // sudden jump -> KLT snapped to a wrong feature
+      dropped++;
+    } else {
+      for (int c = 0; c < 64; ++c) it->second[c] = d[c];  // roll reference forward
+    }
+  }
+  if (evaluated > 0)
+    ROS_INFO("descriptor-clean: dropped %d / %d evaluated (cos min=%.2f mean=%.2f)",
+             dropped, evaluated, cmin, csum / evaluated);
+}
+
+// LighterGlue-match prev<->cur XFeat, fit a RANSAC homography, warp prev_pts_ into
+// predict_pts_ (aligned to prev_pts_). Returns false if not enough matches.
+bool FeatureTrackerKLT::computeGuidedPrediction() {
+  const std::vector<cv::Point2f> &src = matched_src_;  // filled by matchPrevCur()
+  const std::vector<cv::Point2f> &dst = matched_dst_;
+  if (src.size() < 12) return false;
+
+  predict_pts_.resize(prev_pts_.size());
+  predict_pts_debug_.clear();
+
+  if (params.xfeat_guided_init == 2) {
+    // Per-point: each tracked point inherits the displacement of the nearest
+    // confident match (parallax-aware; falls back to prev location if no match
+    // within radius). Better than a global homography for 3-D scenes.
+    const float r2 = 80.0f * 80.0f;
+    for (size_t k = 0; k < prev_pts_.size(); ++k) {
+      const cv::Point2f &q = prev_pts_[k];
+      float best = r2;
+      int bi = -1;
+      for (size_t i = 0; i < src.size(); ++i) {
+        float dx = src[i].x - q.x, dy = src[i].y - q.y;
+        float d2 = dx * dx + dy * dy;
+        if (d2 < best) { best = d2; bi = static_cast<int>(i); }
+      }
+      predict_pts_[k] = (bi >= 0) ? cv::Point2f(q.x + (dst[bi].x - src[bi].x),
+                                                q.y + (dst[bi].y - src[bi].y))
+                                  : q;
+      predict_pts_debug_.push_back(predict_pts_[k]);
+    }
+    return true;
+  }
+
+  // Mode 1: global RANSAC homography warp.
+  cv::Mat H = cv::findHomography(src, dst, cv::RANSAC, 3.0);
+  if (H.empty()) return false;
+  std::vector<cv::Point2f> warped;
+  cv::perspectiveTransform(prev_pts_, warped, H);
+  for (size_t k = 0; k < prev_pts_.size(); ++k) {
+    const cv::Point2f &p = warped[k];
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || p.x < -50 || p.x > col + 50 ||
+        p.y < -50 || p.y > row + 50) {
+      predict_pts_[k] = prev_pts_[k];
+    } else {
+      predict_pts_[k] = p;
+    }
+    predict_pts_debug_.push_back(predict_pts_[k]);
+  }
+  return true;
+}
+
+// Seed up to (max_cnt - currently tracked) new features from XFeat keypoints,
+// highest score first, respecting the current mask_ (min_dist spacing). KLT
+// optical flow then tracks them across subsequent frames.
+void FeatureTrackerKLT::detectNewFeatures(int n_max_cnt) {
+  if (n_max_cnt <= 0 || !xfeat_) return;
+  if (cur_xf_.n == 0) cur_xf_ = xfeat_->run(cur_img_);  // normally extracted at frame start
+  const XFeatFeatures &xf = cur_xf_;
+  std::vector<int> order(xf.n);
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(),
+            [&](int a, int b) { return xf.scores[a] > xf.scores[b]; });
+  std::vector<cv::Point2f> new_pts;
+  std::vector<int> new_src;  // cur_xf_ keypoint index each seed came from (anchor descriptor)
+  for (int idx : order) {
+    if (static_cast<int>(cur_pts_.size() + new_pts.size()) >= params.max_cnt) break;
+    if (xf.scores[idx] < params.xfeat_score_thr) break;  // sorted: rest are lower
+    const cv::Point2f &p = xf.keypoints[idx];
+    int xi = cvRound(p.x);
+    int yi = cvRound(p.y);
+    if (xi < 0 || xi >= col || yi < 0 || yi >= row) continue;
+    if (!mask_.empty() && mask_.at<uchar>(yi, xi) != 255) continue;
+    new_pts.push_back(p);
+    new_src.push_back(idx);
+    cv::circle(mask_, p, params.min_dist, 0, -1);
+  }
+  // Snap seeds to sub-pixel corners so KLT starts on well-localized, trackable
+  // points (XFeat keypoints sit on the 8x8 detection grid).
+  if (params.xfeat_subpix && !new_pts.empty()) {
+    cv::cornerSubPix(
+        cur_img_, new_pts, cv::Size(5, 5), cv::Size(-1, -1),
+        cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 20, 0.01));
+  }
+  for (size_t j = 0; j < new_pts.size(); ++j) {
+    cur_pts_.push_back(new_pts[j]);
+    int id = IdCounter::get();
+    ids_.push_back(id);
+    track_cnt_.push_back(1);
+    // Seed this track's rolling reference with its birth descriptor (XFeat is L2-normalized).
+    if (params.xfeat_clean) {
+      const float *d = &xf.descriptors[new_src[j] * 64];
+      std::array<float, 64> a;
+      for (int c = 0; c < 64; ++c) a[c] = d[c];
+      ref_desc_[id] = a;
+    }
+  }
 }
 
 void FeatureTrackerKLT::showUndistortion(const string & /*name*/) {

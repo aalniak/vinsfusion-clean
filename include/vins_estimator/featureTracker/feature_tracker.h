@@ -7,6 +7,7 @@
 #include <vins_estimator/estimator/parameters.h>
 #include <vins_estimator/featureTracker/feature_tracker_klt.h>
 #include <vins_estimator/featureTracker/feature_tracker_tapnext.h>
+#include <vins_estimator/featureTracker/feature_tracker_xfeat.h>
 #include <vins_estimator/utility/tic_toc.h>
 
 #include <csignal>
@@ -24,10 +25,15 @@ namespace vins::estimator {
 class FeatureTracker {
  public:
   explicit FeatureTracker(Parameters &params)
-      : klt_tracker_(params), tapnext_tracker_(params), params(params) {}
+      : klt_tracker_(params),
+        tapnext_tracker_(params),
+        xfeat_tracker_(params),
+        params(params) {}
 
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat()) {
+    // When params.xfeat_enable, the KLT tracker seeds new features from XFeat
+    // (hybrid: XFeat detect + KLT optical-flow track) — handled inside KLT.
     // check is tapnext enabled
     if (!params.tapnext_enable) {
       return klt_tracker_.trackImage(_cur_time, _img, _img1);
@@ -46,6 +52,7 @@ class FeatureTracker {
 
   map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageCUDA(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat()) {
+    // Hybrid XFeat-detect + KLT-track is handled inside klt_tracker_ when enabled.
     // check is tapnext enabled
     if (!params.tapnext_enable) {
       return klt_tracker_.trackImageCUDA(_cur_time, _img, _img1);
@@ -64,7 +71,12 @@ class FeatureTracker {
 
   void readIntrinsicParameter(const vector<string> &calib_file) {
     klt_tracker_.readIntrinsicParameter(calib_file);
-    tapnext_tracker_.readIntrinsicParameter(calib_file);
+    // Only build a tracker's TensorRT engine(s) if that tracker is enabled.
+    if (params.tapnext_enable) {
+      tapnext_tracker_.readIntrinsicParameter(calib_file);
+    }
+    // KLT's readIntrinsicParameter (above) initializes the XFeat detector when
+    // params.xfeat_enable.
   }
 
   void setPrediction(map<int, Eigen::Vector3d> &predictPts) {
@@ -91,6 +103,7 @@ class FeatureTracker {
  private:
   FeatureTrackerKLT klt_tracker_;
   FeatureTrackerTAPNext tapnext_tracker_;
+  FeatureTrackerXFeat xfeat_tracker_;
   Parameters &params;
 };
 

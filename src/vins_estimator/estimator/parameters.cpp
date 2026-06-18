@@ -585,6 +585,83 @@ void Parameters::read_from_file(const std::string &config_file) {
         fsSettings["tapnext_reset_max_frames"] >> tapnext_reset_max_frames;
     }
 
+  // ---- XFeat + LighterGlue mono tracker ----
+  if (fsSettings["xfeat_enable"].empty()) {
+    xfeat_enable = false;
+  } else {
+    fsSettings["xfeat_enable"] >> xfeat_enable;
+  }
+  if (fsSettings["xfeat_engine_path"].empty()) {
+    xfeat_engine_path = "";
+  } else {
+    fsSettings["xfeat_engine_path"] >> xfeat_engine_path;
+  }
+  if (fsSettings["xfeat_lighterglue_engine_path"].empty()) {
+    xfeat_lighterglue_engine_path = "";
+  } else {
+    fsSettings["xfeat_lighterglue_engine_path"] >> xfeat_lighterglue_engine_path;
+  }
+  if (fsSettings["xfeat_matcher"].empty()) {
+    xfeat_matcher = 0;  // LighterGlue
+  } else {
+    fsSettings["xfeat_matcher"] >> xfeat_matcher;
+  }
+  if (fsSettings["xfeat_min_conf"].empty()) {
+    xfeat_min_conf = 0.1F;
+  } else {
+    fsSettings["xfeat_min_conf"] >> xfeat_min_conf;
+  }
+  if (fsSettings["xfeat_score_thr"].empty()) {
+    xfeat_score_thr = 0.05F;
+  } else {
+    fsSettings["xfeat_score_thr"] >> xfeat_score_thr;
+  }
+  if (fsSettings["xfeat_subpix"].empty()) {
+    xfeat_subpix = 0;  // cornerSubPix hurt XFeat seeds on MH_04; off by default
+  } else {
+    fsSettings["xfeat_subpix"] >> xfeat_subpix;
+  }
+  if (fsSettings["xfeat_guided_init"].empty()) {
+    xfeat_guided_init = 0;
+  } else {
+    fsSettings["xfeat_guided_init"] >> xfeat_guided_init;
+  }
+  if (fsSettings["xfeat_recover"].empty()) {
+    xfeat_recover = 0;
+  } else {
+    fsSettings["xfeat_recover"] >> xfeat_recover;
+  }
+  if (fsSettings["xfeat_recover_radius"].empty()) {
+    xfeat_recover_radius = 30.0F;  // search radius for the nearest confident match
+  } else {
+    fsSettings["xfeat_recover_radius"] >> xfeat_recover_radius;
+  }
+  if (fsSettings["xfeat_recover_flow_tol"].empty()) {
+    xfeat_recover_flow_tol = 3.0F;  // borrow flow only where local field is uniform
+  } else {
+    fsSettings["xfeat_recover_flow_tol"] >> xfeat_recover_flow_tol;
+  }
+  if (fsSettings["xfeat_recover_max_ratio"].empty()) {
+    xfeat_recover_max_ratio = 0.5F;  // cap re-injection per frame (catastrophic only)
+  } else {
+    fsSettings["xfeat_recover_max_ratio"] >> xfeat_recover_max_ratio;
+  }
+  if (fsSettings["xfeat_clean"].empty()) {
+    xfeat_clean = 0;
+  } else {
+    fsSettings["xfeat_clean"] >> xfeat_clean;
+  }
+  if (fsSettings["xfeat_clean_thr"].empty()) {
+    xfeat_clean_thr = 0.7F;  // validated operating point: drop only clear wrong-feature jumps
+  } else {
+    fsSettings["xfeat_clean_thr"] >> xfeat_clean_thr;
+  }
+  if (fsSettings["xfeat_clean_radius"].empty()) {
+    xfeat_clean_radius = 5.0F;  // tight: nearest keypoint must be the SAME feature
+  } else {
+    fsSettings["xfeat_clean_radius"] >> xfeat_clean_radius;
+  }
+
     if (fsSettings["diagnostics"].empty()) {
         diagnostics = 0;
     } else {

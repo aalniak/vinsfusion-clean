@@ -5,11 +5,11 @@
 imu: 1
 num_of_cam: 1
 
-use_depth: 1
+use_depth: 0
 min_features: 50
 
-use_cuda_in_optimization: 1
-use_cuda_in_tracking: 1
+use_cuda_in_optimization: 0
+use_cuda_in_tracking: 0
 
 imu_topic: "/ovc_imu/data"
 image0_topic: "/camera/left/image_raw"
@@ -68,15 +68,15 @@ body_T_cam1: !!opencv-matrix
 multiple_thread: 1
 
 #feature traker paprameters
-max_cnt: 256            # max feature number in feature tracking
-min_dist: 30            # min distance between two features 
+max_cnt: 150
+min_dist: 30
 freq: 10                # frequence (Hz) of publish tracking result. At least 10Hz for good estimation. If set 0, the frequence will be same as raw image 
 F_threshold: 1.0        # ransac threshold (pixel)
 show_track: 1           # publish tracking image as topic
 flow_back: 1            # perform forward and backward optical flow to improve feature tracking accuracy
 #depth_map_filename: "/datasets/rover/rover_depth.tiff"
-max_solver_time: 40  # max solver itration time (ms), to guarantee real time 0.04
-max_num_iterations: 8   # max solver itrations, to guarantee real time
+max_solver_time: 0.04
+max_num_iterations: 6
 keyframe_parallax: 10.0 # keyframe selection threshold (pixel)
 
 #imu parameters       The more accurate parameters you provide, the better performance

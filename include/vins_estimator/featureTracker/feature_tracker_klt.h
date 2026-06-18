@@ -19,6 +19,12 @@
 #include <vins_estimator/estimator/parameters.h>
 #include <vins_estimator/utility/tic_toc.h>
 #include <vins_estimator/featureTracker/id_counter.h>
+#include <vins_estimator/featureTracker/xfeat_trt.h>
+#include <vins_estimator/featureTracker/lighterglue_trt.h>
+#include <memory>
+#include <array>
+#include <unordered_map>
+#include <unordered_set>
 #include <fstream>
 #include <csignal>
 #include <cstdio>
@@ -120,6 +126,38 @@ class FeatureTrackerKLT {
   double prev_time_;
   bool stereo_cam_;
   bool has_prediction_;
+
+  // Hybrid mode: when params.xfeat_enable, new features are seeded from XFeat
+  // keypoints (robust, learned) instead of Shi-Tomasi, then tracked by KLT
+  // optical flow (long, continuous tracks for depth). Null when disabled.
+  std::unique_ptr<XFeatTRT> xfeat_;
+  void detectNewFeatures(int n_max_cnt);
+
+  // Guided initialization (params.xfeat_guided_init): match prev<->cur XFeat with
+  // LighterGlue, fit a RANSAC homography, and warp prev_pts_ into predict_pts_ as
+  // KLT's initial-flow guess — eases KLT under large displacement / motion blur.
+  std::unique_ptr<LighterGlueTRT> lighterglue_;
+  XFeatFeatures cur_xf_;     // current frame XFeat (extracted once, reused for seeding)
+  XFeatFeatures prev_xf_;    // previous frame XFeat (for guided matching)
+  bool prev_xf_valid_ = false;
+  // Confident prev<->cur LighterGlue matches for this frame (src=prev, dst=cur),
+  // computed once and shared by guided-init and track-recovery.
+  std::vector<cv::Point2f> matched_src_, matched_dst_;
+  void extractAndGuide();    // run XFeat (+ optional guided prediction) at frame start
+  void matchPrevCur();       // fill matched_src_/matched_dst_ via LighterGlue
+  bool computeGuidedPrediction();
+  // Recover KLT-lost tracks (status==0) using a nearby confident LighterGlue
+  // match's displacement. Only touches failures -> cannot regress good tracks.
+  int recoverLostTracks(std::vector<uchar> &status);
+
+  // Descriptor-consistency cleaning (params.xfeat_clean): each track keeps a reference
+  // XFeat descriptor that ROLLS forward each frame (nearest keypoint's descriptor); a
+  // large per-frame cosine drop = KLT snapped to a wrong feature -> drop the track.
+  // Rolling (vs a fixed birth anchor) tolerates slow legitimate appearance change --
+  // the anchor variant accumulated drift, killed good long tracks, and diverged on
+  // stairs. Keyed by feature id (survives reduceVector); pruned in extractAndGuide().
+  std::unordered_map<int, std::array<float, 64>> ref_desc_;
+  void cleanDriftedTracks(std::vector<uchar> &status);
 };
 
 }  // namespace vins::estimator

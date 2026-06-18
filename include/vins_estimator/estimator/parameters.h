@@ -105,6 +105,23 @@ struct Parameters {
   int tapnext_reset_min_count;
   int tapnext_reset_max_frames;
 
+  // XFeat + LighterGlue mono tracker (selectable replacement for KLT).
+  bool xfeat_enable;
+  std::string xfeat_engine_path;             // XFeat extractor FP16 engine
+  std::string xfeat_lighterglue_engine_path; // LighterGlue matcher FP16 engine
+  int xfeat_matcher;                         // 0: LighterGlue, 1: MNN cosine fallback
+  float xfeat_min_conf;                      // min match confidence to keep a track
+  float xfeat_score_thr;                     // min XFeat score to seed a new feature
+  int xfeat_subpix;                          // 1: cornerSubPix-refine XFeat seeds (hybrid)
+  int xfeat_guided_init;                     // 1: LighterGlue homography / 2: per-point -> KLT init guess
+  int xfeat_recover;                         // 1: recover KLT-lost tracks via LighterGlue matches
+  float xfeat_recover_radius;                // px: search radius for the nearest confident match to a lost track
+  float xfeat_recover_flow_tol;              // px: max neighbour-flow disagreement before a borrowed flow is rejected
+  float xfeat_recover_max_ratio;             // cap recovered tracks at this fraction of live tracks per frame
+  int xfeat_clean;                           // 1: drop KLT tracks whose XFeat descriptor drifted from birth
+  float xfeat_clean_thr;                     // min cosine similarity to the birth ("anchor") descriptor
+  float xfeat_clean_radius;                  // px: max dist to nearest current XFeat keypoint used as proxy
+
   bool stereo_init;
   int stereo_init_lag;
   
