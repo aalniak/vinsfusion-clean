@@ -2,6 +2,8 @@
 
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <opencv2/imgproc.hpp>
@@ -32,6 +34,8 @@ XFeatTRT::~XFeatTRT() {
   if (d_kpts_) cudaFree(d_kpts_);
   if (d_scores_) cudaFree(d_scores_);
   if (d_desc_) cudaFree(d_desc_);
+  if (d_dense_) cudaFree(d_dense_);
+  if (dense_) cudaFreeHost(dense_);
 }
 
 void XFeatTRT::loadEngine(const std::string &path) {
@@ -64,7 +68,24 @@ void XFeatTRT::loadEngine(const std::string &path) {
   in_w_ = in_shape.d[3];
   auto kpts_shape = engine_->getTensorShape(kKpts);
   top_k_ = kpts_shape.d[1];
+
+  // Detect the optional dense descriptor map output (engine exported with --dense).
+  int nio = engine_->getNbIOTensors();
+  for (int i = 0; i < nio; ++i) {
+    if (std::string(engine_->getIOTensorName(i)) == kDense) {
+      has_dense_ = true;
+      break;
+    }
+  }
+  if (has_dense_) {
+    auto ds = engine_->getTensorShape(kDense);  // (1,64,H/8,W/8)
+    d8_h_ = ds.d[2];
+    d8_w_ = ds.d[3];
+  }
   std::cerr << "[XFeatTRT] engine " << in_w_ << "x" << in_h_ << " top_k=" << top_k_
+            << (has_dense_ ? " +dense(" + std::to_string(d8_w_) + "x" +
+                                 std::to_string(d8_h_) + ")"
+                           : "")
             << std::endl;
 }
 
@@ -73,6 +94,14 @@ void XFeatTRT::allocateBuffers() {
   CHECK_CUDA(cudaMalloc(&d_kpts_, static_cast<size_t>(top_k_) * 2 * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&d_scores_, static_cast<size_t>(top_k_) * sizeof(float)));
   CHECK_CUDA(cudaMalloc(&d_desc_, static_cast<size_t>(top_k_) * 64 * sizeof(float)));
+  if (has_dense_) {
+    dense_n_ = static_cast<size_t>(64) * d8_h_ * d8_w_;
+    CHECK_CUDA(cudaMalloc(&d_dense_, dense_n_ * sizeof(float)));
+    // Pinned host memory -> fast, truly-async D2H (pageable 4 MB copies stalled the
+    // front-end and broke VINS init).
+    CHECK_CUDA(cudaHostAlloc(reinterpret_cast<void **>(&dense_),
+                             dense_n_ * sizeof(float), cudaHostAllocDefault));
+  }
 }
 
 XFeatFeatures XFeatTRT::run(const cv::Mat &img) {
@@ -103,6 +132,7 @@ XFeatFeatures XFeatTRT::run(const cv::Mat &img) {
   context_->setTensorAddress(kKpts, d_kpts_);
   context_->setTensorAddress(kScores, d_scores_);
   context_->setTensorAddress(kDesc, d_desc_);
+  if (has_dense_) context_->setTensorAddress(kDense, d_dense_);
   context_->enqueueV3(stream);
 
   XFeatFeatures out;
@@ -119,6 +149,13 @@ XFeatFeatures XFeatTRT::run(const cv::Mat &img) {
   CHECK_CUDA(cudaMemcpyAsync(out.descriptors.data(), d_desc_,
                              out.descriptors.size() * sizeof(float),
                              cudaMemcpyDeviceToHost, stream));
+  if (has_dense_ && dense_enabled_) {
+    CHECK_CUDA(cudaMemcpyAsync(dense_, d_dense_, dense_n_ * sizeof(float),
+                               cudaMemcpyDeviceToHost, stream));
+    // image-coord -> dense-cell: cell = x * (W/8)/img_w  (engine resize folded in).
+    dense_sx_ = static_cast<float>(d8_w_) / static_cast<float>(img.cols);
+    dense_sy_ = static_cast<float>(d8_h_) / static_cast<float>(img.rows);
+  }
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
   // 2. Rescale keypoints from engine resolution back to the original image.
@@ -128,6 +165,35 @@ XFeatFeatures XFeatTRT::run(const cv::Mat &img) {
   for (int i = 0; i < top_k_; ++i) {
     out.keypoints.emplace_back(kpts[2 * i] * sx, kpts[2 * i + 1] * sy);
   }
+  return out;
+}
+
+std::array<float, 64> XFeatTRT::sampleDense(float x, float y) const {
+  std::array<float, 64> out{};
+  if (!has_dense_ || dense_ == nullptr) return out;
+  float cx = x * dense_sx_, cy = y * dense_sy_;  // continuous cell coords
+  if (cx < 0.f) cx = 0.f;
+  if (cy < 0.f) cy = 0.f;
+  if (cx > d8_w_ - 1) cx = d8_w_ - 1;
+  if (cy > d8_h_ - 1) cy = d8_h_ - 1;
+  int x0 = static_cast<int>(cx), y0 = static_cast<int>(cy);
+  int x1 = std::min(x0 + 1, d8_w_ - 1), y1 = std::min(y0 + 1, d8_h_ - 1);
+  float ax = cx - x0, ay = cy - y0;
+  float w00 = (1 - ax) * (1 - ay), w01 = ax * (1 - ay);
+  float w10 = (1 - ax) * ay, w11 = ax * ay;
+  const float *D = dense_;
+  const int s = d8_h_ * d8_w_;
+  const int i00 = y0 * d8_w_ + x0, i01 = y0 * d8_w_ + x1;
+  const int i10 = y1 * d8_w_ + x0, i11 = y1 * d8_w_ + x1;
+  float norm = 0.f;
+  for (int c = 0; c < 64; ++c) {
+    const float *Dc = D + c * s;
+    float v = w00 * Dc[i00] + w01 * Dc[i01] + w10 * Dc[i10] + w11 * Dc[i11];
+    out[c] = v;
+    norm += v * v;
+  }
+  norm = std::sqrt(norm) + 1e-9f;
+  for (int c = 0; c < 64; ++c) out[c] /= norm;
   return out;
 }
 

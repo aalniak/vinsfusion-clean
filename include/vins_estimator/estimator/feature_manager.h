@@ -29,7 +29,7 @@ namespace vins::estimator {
 
 class FeaturePerFrame {
  public:
-  FeaturePerFrame(const Eigen::Matrix<double, 7, 1> &_point, double td) {
+  FeaturePerFrame(const Eigen::Matrix<double, 8, 1> &_point, double td) {
     point.x() = _point(0);
     point.y() = _point(1);
     point.z() = _point(2);
@@ -41,7 +41,7 @@ class FeaturePerFrame {
     is_stereo = false;
   }
 
-  void rightObservation(const Eigen::Matrix<double, 7, 1> &_point) {
+  void rightObservation(const Eigen::Matrix<double, 8, 1> &_point) {
     pointRight.x() = _point(0);
     pointRight.y() = _point(1);
     pointRight.z() = _point(2);
@@ -76,6 +76,7 @@ class FeaturePerId {
   int used_num;
   double estimated_depth;
   int solve_flag;  // 0 haven't solve yet; 1 solve succ; 2 solve fail;
+  bool depth_primed = false;  // seeded with a depth-map prior (RESCUE) -> eligible for gate relaxation
   
   // Temporal depth stability tracking (for filtering flickering zero-shot depth)
   std::vector<double> depth_history;  // Circular buffer of aligned inverse depths
@@ -170,6 +171,14 @@ class FeaturePerId {
   }
 };
 
+// Observation-gate threshold for the depth-vector / optimizer. Depth-primed features (seeded with a
+// depth-map prior) may enter with fewer observations when relax_obs_gate is enabled (Phase 1).
+// MUST be applied IDENTICALLY at every gate site (getFeatureCount/getDepthVector/setDepth/
+// triangulate + optimization + marginalization) so para_Feature depth-vector indexing stays aligned.
+inline int featureObsGate(const FeaturePerId &f, const Parameters &p) {
+  return (p.relax_obs_gate && f.depth_primed) ? p.min_obs_depth_primed : 4;
+}
+
 class FeatureManager {
  public:
   FeatureManager(Parameters &params);
@@ -179,7 +188,7 @@ class FeatureManager {
   int getFeatureCount();
   bool addFeatureCheckParallax(
       int frame_count,
-      const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
+      const map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> &image,
       double td);
   vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l,
                                                     int frame_count_r);
@@ -209,7 +218,7 @@ class FeatureManager {
   void removeOutlier(set<int> &outlierIndex);
 
   static void logFeature(
-      const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
+      const map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> &image,
       const string &path);
   static void logOutlier(const set<int> &outlierIndex, const string &path);
 

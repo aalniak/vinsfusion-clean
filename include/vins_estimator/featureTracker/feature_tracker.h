@@ -30,7 +30,7 @@ class FeatureTracker {
         xfeat_tracker_(params),
         params(params) {}
 
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> trackImage(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat()) {
     // When params.xfeat_enable, the KLT tracker seeds new features from XFeat
     // (hybrid: XFeat detect + KLT optical-flow track) — handled inside KLT.
@@ -50,7 +50,7 @@ class FeatureTracker {
     return klt;
   }
 
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageCUDA(
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> trackImageCUDA(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat()) {
     // Hybrid XFeat-detect + KLT-track is handled inside klt_tracker_ when enabled.
     // check is tapnext enabled

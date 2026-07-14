@@ -131,7 +131,7 @@ void FeatureTrackerXFeat::drawTrack(const cv::Mat &img, const std::vector<int> &
   }
 }
 
-std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 7, 1>>>>
+std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 8, 1>>>>
 FeatureTrackerXFeat::trackImage(double cur_time, const cv::Mat &img,
                                 const cv::Mat & /*img1*/) {
   TicToc t_all;
@@ -252,9 +252,9 @@ FeatureTrackerXFeat::trackImage(double cur_time, const cv::Mat &img,
   has_prev_ = true;
 
   // 6. Assemble the canonical VINS feature frame (mono => camera_id 0).
-  std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 7, 1>>>> frame;
+  std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 8, 1>>>> frame;
   for (size_t i = 0; i < ids.size(); ++i) {
-    Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
+    Eigen::Matrix<double, 8, 1> xyz_uv_velocity;
     xyz_uv_velocity << un_pts[i].x, un_pts[i].y, 1.0, cur_pts[i].x, cur_pts[i].y,
         velocity[i].x, velocity[i].y;
     frame[ids[i]].emplace_back(0, xyz_uv_velocity);

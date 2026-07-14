@@ -114,6 +114,7 @@ struct Parameters {
   float xfeat_score_thr;                     // min XFeat score to seed a new feature
   int xfeat_subpix;                          // 1: cornerSubPix-refine XFeat seeds (hybrid)
   int xfeat_guided_init;                     // 1: LighterGlue homography / 2: per-point -> KLT init guess
+  float xfeat_guided_min_disp;               // px: only guide when median match displacement exceeds this (0=always)
   int xfeat_recover;                         // 1: recover KLT-lost tracks via LighterGlue matches
   float xfeat_recover_radius;                // px: search radius for the nearest confident match to a lost track
   float xfeat_recover_flow_tol;              // px: max neighbour-flow disagreement before a borrowed flow is rejected
@@ -121,6 +122,26 @@ struct Parameters {
   int xfeat_clean;                           // 1: drop KLT tracks whose XFeat descriptor drifted from birth
   float xfeat_clean_thr;                     // min cosine similarity to the birth ("anchor") descriptor
   float xfeat_clean_radius;                  // px: max dist to nearest current XFeat keypoint used as proxy
+  int xfeat_kf_recover;                      // 1: revive KLT-lost tracks via wide-baseline LighterGlue match to last keyframe
+  int xfeat_kf_interval;                     // frames between keyframe snapshots
+  float xfeat_kf_min_conf;                   // min LighterGlue mscore to revive a track from the keyframe
+  float xfeat_kf_anchor_radius;              // px: max dist from a track to its keyframe keypoint at snapshot time
+  int xfeat_dyn_mask;                        // 1: drop features that persistently violate the rigid epipolar constraint (moving objects)
+  float xfeat_dyn_thr;                       // px: RANSAC-F inlier threshold (epipolar-line distance)
+  int xfeat_dyn_persist;                     // consecutive outlier frames before a track is dropped as dynamic
+  int xfeat_adaptive_density;                // 1: top up under-filled (low-texture) frames with a relaxed 2nd seeding pass
+  float xfeat_adaptive_min_ratio;            // 2nd-pass spacing = min_dist * this (tighter packing for fill points)
+  float xfeat_adaptive_score_ratio;          // 2nd-pass score floor = xfeat_score_thr * this (accept weaker keypoints)
+  int xfeat_semidense;                       // 1: track features by dense-descriptor matching (replaces KLT optical flow)
+  float xfeat_sd_radius;                     // px: local search half-window around predicted position
+  float xfeat_sd_step;                       // px: coarse search grid step (parabolic sub-pixel refine after)
+  float xfeat_sd_thr;                        // min cosine (vs rolling reference) to keep a semi-dense track
+
+  // Observation-confidence weighting of visual reprojection residuals (Idea #6 probe).
+  // Scales each feature's mono projection-factor information by a per-track weight in [min,1].
+  int obs_weight_mode;    // 0: off (uniform, default). 1: track-length ramp (used_num proxy for track_cnt).
+  float obs_weight_min;   // weight floor applied to the shortest in-window tracks
+  int obs_weight_sat;     // observation count at which the weight saturates to 1.0
 
   bool stereo_init;
   int stereo_init_lag;
@@ -164,6 +185,12 @@ struct Parameters {
   double photometric_l1_weight;             // L1 portion weight (default: 0.15)
   
   int video_mode;                           // 0: default, 1: video/stateful
+
+  // Observation-gate relaxation for depth-primed features (Phase 1 experiment).
+  // When relax_obs_gate=1, a feature that carries a depth-map prior (depth_primed)
+  // may enter the optimizer with >= min_obs_depth_primed observations instead of >= 4.
+  int relax_obs_gate;                       // 0: off (standard used_num>=4 gate, default). 1: relax for depth-primed.
+  int min_obs_depth_primed;                 // min observations to admit a depth-primed feature (e.g. 2)
 
 
   int diagnostics;

@@ -107,7 +107,7 @@ cv::Point2f rectifiedToDistorted(const cv::Point2f &pt_rect,
                      static_cast<float>(pt_distorted_eigen.y()));
 }
 
-map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
+map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>>
 FeatureTrackerTAPNext::trackImage(double cur_time, const cv::Mat &cur_img,
                                const cv::Mat &) {
   TicToc t_r;
@@ -201,7 +201,7 @@ FeatureTrackerTAPNext::trackImage(double cur_time, const cv::Mat &cur_img,
   for (size_t i = 0; i < cur_pts.size(); i++)
     prev_pts_map_[ids[i]] = cur_pts[i];
 
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> featureFrame;
   for (size_t i = 0; i < ids.size(); i++) {
     int feature_id = ids[i];
     double x = cur_un_pts[i].x;
@@ -213,7 +213,7 @@ FeatureTrackerTAPNext::trackImage(double cur_time, const cv::Mat &cur_img,
     double velocity_x = pts_velocity[i].x;
     double velocity_y = pts_velocity[i].y;
 
-    Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
+    Eigen::Matrix<double, 8, 1> xyz_uv_velocity;
     xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
     featureFrame[feature_id].emplace_back(camera_id, xyz_uv_velocity);
   }

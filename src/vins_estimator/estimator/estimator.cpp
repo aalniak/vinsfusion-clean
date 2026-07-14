@@ -25,7 +25,24 @@
 #include <vins_estimator/factor/photometricRegFactor.h> // For PhotometricRegFactor
 
 namespace vins::estimator {
-// ------- Depth factor declaration ------- 
+
+namespace {
+// --- Idea #6 probe: per-feature confidence weighting of visual reprojection residuals. ---
+// Returns a multiplier in (0,1] applied to the mono projection factor's sqrt_info (the feature's
+// information then scales by weight^2). mode 0 -> uniform (1.0, current behaviour). mode 1 -> ramp
+// with track length n (= used_num, the window-capped proxy for the tracker's track_cnt): short/
+// fresh tracks (less validated, likelier mismatches/outliers) fall toward obs_weight_min; tracks
+// observed across >= obs_weight_sat frames get full weight 1.0.
+inline double featureObsWeight(int mode, double w_min, int sat, int n) {
+  if (mode <= 0) return 1.0;
+  const double denom = std::max(1.0, static_cast<double>(sat) - 2.0);
+  double t = (static_cast<double>(n) - 2.0) / denom;  // 2 obs -> 0 ; >= sat obs -> 1
+  t = std::min(1.0, std::max(0.0, t));
+  return w_min + (1.0 - w_min) * t;
+}
+}  // namespace
+
+// ------- Depth factor declaration -------
 // This factor pulls VIO inverse depth toward the aligned monocular depth prediction
 // Using a GLOBAL (temporally smoothed) scale and shift, not per-frame optimization
 struct DepthPriorFactor
@@ -554,7 +571,7 @@ void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &depth_i
 
   // 4. Feature Tracking
   // Now strictly passing a Mono8 image every time
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> featureFrame;
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> featureFrame;
   
   if (params.multiple_thread) {
     mBuf.lock();
@@ -617,7 +634,7 @@ void Estimator::inputIMU(double t, const Vector3d &linearAcceleration,
 }
 
 void Estimator::inputFeature(
-    double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>
+    double t, const map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>>
                   &featureFrame) {
   mBuf.lock();
   featureBuf.emplace(t, featureFrame);
@@ -663,7 +680,7 @@ bool Estimator::IMUAvailable(double t) {
 void Estimator::processMeasurements() {
   while (ros::ok()) {
     // printf("process measurments\n");
-    pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>>
+    pair<double, map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>>>
         feature;
     vector<pair<double, Eigen::Vector3d>> accVector;
     vector<pair<double, Eigen::Vector3d>> gyrVector;
@@ -1133,7 +1150,8 @@ void Estimator::smartDepthInitialization() {
                                 continue; // Reject if reprojection error too high
                               }
                                  it_per_id.estimated_depth = new_depth;
-                                 it_per_id.solve_flag = 1; 
+                                 it_per_id.solve_flag = 1;
+                                 it_per_id.depth_primed = true;  // depth-map prior set -> eligible for gate relaxation
                                  rescued_count++;
                              }
                          }
@@ -1154,7 +1172,7 @@ void Estimator::smartDepthInitialization() {
 }
 
 void Estimator::processImage(
-    const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
+    const map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> &image,
     const double header) {
   ROS_DEBUG("new image coming ------------------------------------------");
   ROS_DEBUG("Adding feature points %lu", image.size());
@@ -2509,7 +2527,7 @@ void Estimator::optimization() {
   // Just to use for debug later
   for (auto &it_per_id : f_manager.feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
-    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
     int first_frame_idx = it_per_id.start_frame;
     numbers[first_frame_idx]++;
     // Feature tracking counter commented out for performance
@@ -2530,7 +2548,7 @@ void Estimator::optimization() {
 
   for (auto &it_per_id : f_manager.feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
-    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
     ++feature_index;
     
     // =========================================================================
@@ -2621,6 +2639,9 @@ void Estimator::optimization() {
 
     Vector3d pts_i = it_per_id.feature_per_frame[0].point;
 
+    double obs_w = featureObsWeight(params.obs_weight_mode, params.obs_weight_min,
+                                    params.obs_weight_sat, it_per_id.used_num);
+
     for (auto &it_per_frame : it_per_id.feature_per_frame) {
       imu_j++;
       if (imu_i != imu_j) {
@@ -2629,7 +2650,7 @@ void Estimator::optimization() {
             new ProjectionTwoFrameOneCamFactor(
                 pts_i, pts_j, it_per_id.feature_per_frame[0].velocity,
                 it_per_frame.velocity, it_per_id.feature_per_frame[0].cur_td,
-                it_per_frame.cur_td);
+                it_per_frame.cur_td, obs_w);
         ceres::ResidualBlockId block_id = problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i],
                                  para_Pose[imu_j], para_Ex_Pose[0],
                                  para_Feature[feature_index], para_Td[0]);
@@ -2695,8 +2716,12 @@ void Estimator::optimization() {
       // Skip features too close to window edge
       if (first_frame_idx > WINDOW_SIZE - 2) continue;
       
-      // Skip features that haven't been tracked long enough
-      if (it_per_id.feature_per_frame.size() < 3) continue;
+      // Skip features that haven't been tracked long enough.
+      // Relaxed for depth-primed features so a short, depth-primed track still receives a
+      // weighted DepthPriorFactor (otherwise it would enter the optimizer under-constrained).
+      int min_obs_prior = (params.relax_obs_gate && it_per_id.depth_primed)
+                              ? params.min_obs_depth_primed : 3;
+      if ((int)it_per_id.feature_per_frame.size() < min_obs_prior) continue;
       
       double timestamp = Headers[first_frame_idx];
       auto frame_it = all_image_frame.find(timestamp);
@@ -3106,7 +3131,7 @@ void Estimator::optimization() {
     int ordinal_feature_idx = -1;
     for (auto &it_per_id : f_manager.feature) {
       it_per_id.used_num = it_per_id.feature_per_frame.size();
-      if (it_per_id.used_num < 4) continue;
+      if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
       ++ordinal_feature_idx;
       
       int first_frame_idx = it_per_id.start_frame;
@@ -3637,7 +3662,7 @@ void Estimator::optimization() {
       // Just to use for debug later
       for (auto &it_per_id : f_manager.feature) {
       it_per_id.used_num = it_per_id.feature_per_frame.size();
-      if (it_per_id.used_num < 4) continue;
+      if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
       int first_frame_idx = it_per_id.start_frame;
       numbers[first_frame_idx]++;
       }
@@ -3650,7 +3675,7 @@ void Estimator::optimization() {
 
     for (auto &it_per_id : f_manager.feature) {
         it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4) continue;
+        if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
         
         ++feature_index;
         
@@ -3660,6 +3685,9 @@ void Estimator::optimization() {
 
         Vector3d pts_i = it_per_id.feature_per_frame[0].point;
 
+        double obs_w = featureObsWeight(params.obs_weight_mode, params.obs_weight_min,
+                                        params.obs_weight_sat, it_per_id.used_num);
+
         for (auto &it_per_frame : it_per_id.feature_per_frame) {
           imu_j++;
           if (imu_i != imu_j) {
@@ -3667,7 +3695,7 @@ void Estimator::optimization() {
             auto *f_td = new ProjectionTwoFrameOneCamFactor(
                 pts_i, pts_j, it_per_id.feature_per_frame[0].velocity,
                 it_per_frame.velocity, it_per_id.feature_per_frame[0].cur_td,
-                it_per_frame.cur_td);
+                it_per_frame.cur_td, obs_w);
             auto *residual_block_info = new ResidualBlockInfo(
                 f_td, loss_function,
                 vector<double *>{para_Pose[imu_i], para_Pose[imu_j],
@@ -3996,7 +4024,7 @@ void Estimator::outliersRejection(set<int> &removeIndex) {
     double err = 0;
     int errCnt = 0;
     it_per_id.used_num = it_per_id.feature_per_frame.size();
-    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
     feature_index++;
     int imu_i = it_per_id.start_frame;
     int imu_j = imu_i - 1;

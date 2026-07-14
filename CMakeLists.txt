@@ -5,7 +5,7 @@ project(vins)
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -g -DNDEBUG")
 cmake_policy(SET CMP0069 NEW)
 cmake_policy(SET CMP0074 NEW)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -48,6 +48,9 @@ find_package(catkin REQUIRED COMPONENTS
   cv_bridge
   image_transport
   message_generation
+  aspn_msgs
+  nova_msgs
+  mors_msgs
 )
 
 find_package(OpenCV REQUIRED COMPONENTS core highgui imgproc video videoio cudaoptflow cudaimgproc cudaarithm)
@@ -217,6 +220,21 @@ target_link_libraries(global_fusion_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
   ${CERES_LIBRARIES}
+)
+
+# GANA endpoint: AlgControl service + VINS-odom -> ASPN GEODETIC PVA trajectory
+add_executable(
+  gana_node
+  src/node/node_gana.cpp
+  src/GeographicLib/LocalCartesian.cpp
+  src/GeographicLib/Geocentric.cpp
+  src/GeographicLib/Math.cpp
+)
+
+add_dependencies(gana_node ${catkin_EXPORTED_TARGETS})
+
+target_link_libraries(gana_node
+  ${catkin_LIBRARIES}
 )
 
 install(DIRECTORY launch/

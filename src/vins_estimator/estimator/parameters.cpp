@@ -466,6 +466,21 @@ void Parameters::read_from_file(const std::string &config_file) {
     ROS_INFO("\033[1;33m[DEPTH] Multi-view depth fusion DISABLED\033[0m");
   }
 
+  // Observation-gate relaxation for depth-primed features (Phase 1 experiment)
+  if (fsSettings["relax_obs_gate"].empty()) {
+    relax_obs_gate = 0;  // Default: standard used_num>=4 gate
+  } else {
+    fsSettings["relax_obs_gate"] >> relax_obs_gate;
+  }
+  if (fsSettings["min_obs_depth_primed"].empty()) {
+    min_obs_depth_primed = 2;  // Default: admit depth-primed features at 2 observations
+  } else {
+    fsSettings["min_obs_depth_primed"] >> min_obs_depth_primed;
+  }
+  if (min_obs_depth_primed < 2) min_obs_depth_primed = 2;  // mono needs >=2 obs to triangulate
+  ROS_INFO("\033[1;36m[GATE] relax_obs_gate=%d, min_obs_depth_primed=%d\033[0m",
+           relax_obs_gate, min_obs_depth_primed);
+
   // Photometric regularization parameters
   if (fsSettings["photometric_reg"].empty()) {
     photometric_reg = 0;  // Default: disabled
@@ -626,6 +641,11 @@ void Parameters::read_from_file(const std::string &config_file) {
   } else {
     fsSettings["xfeat_guided_init"] >> xfeat_guided_init;
   }
+  if (fsSettings["xfeat_guided_min_disp"].empty()) {
+    xfeat_guided_min_disp = 15.0F;  // gate guidance to large-motion frames
+  } else {
+    fsSettings["xfeat_guided_min_disp"] >> xfeat_guided_min_disp;
+  }
   if (fsSettings["xfeat_recover"].empty()) {
     xfeat_recover = 0;
   } else {
@@ -660,6 +680,93 @@ void Parameters::read_from_file(const std::string &config_file) {
     xfeat_clean_radius = 5.0F;  // tight: nearest keypoint must be the SAME feature
   } else {
     fsSettings["xfeat_clean_radius"] >> xfeat_clean_radius;
+  }
+  if (fsSettings["xfeat_kf_recover"].empty()) {
+    xfeat_kf_recover = 0;
+  } else {
+    fsSettings["xfeat_kf_recover"] >> xfeat_kf_recover;
+  }
+  if (fsSettings["xfeat_kf_interval"].empty()) {
+    xfeat_kf_interval = 5;  // snapshot a keyframe every N frames (wide-baseline reference)
+  } else {
+    fsSettings["xfeat_kf_interval"] >> xfeat_kf_interval;
+  }
+  if (fsSettings["xfeat_kf_min_conf"].empty()) {
+    xfeat_kf_min_conf = 0.5F;  // confident wide-baseline correspondence
+  } else {
+    fsSettings["xfeat_kf_min_conf"] >> xfeat_kf_min_conf;
+  }
+  if (fsSettings["xfeat_kf_anchor_radius"].empty()) {
+    xfeat_kf_anchor_radius = 5.0F;  // track must coincide with a keyframe keypoint
+  } else {
+    fsSettings["xfeat_kf_anchor_radius"] >> xfeat_kf_anchor_radius;
+  }
+  if (fsSettings["xfeat_dyn_mask"].empty()) {
+    xfeat_dyn_mask = 0;
+  } else {
+    fsSettings["xfeat_dyn_mask"] >> xfeat_dyn_mask;
+  }
+  if (fsSettings["xfeat_dyn_thr"].empty()) {
+    xfeat_dyn_thr = 3.0F;  // generous epipolar threshold (vs 1px rejectWithF that hurt)
+  } else {
+    fsSettings["xfeat_dyn_thr"] >> xfeat_dyn_thr;
+  }
+  if (fsSettings["xfeat_dyn_persist"].empty()) {
+    xfeat_dyn_persist = 3;  // must violate for N consecutive frames (transient = degeneracy)
+  } else {
+    fsSettings["xfeat_dyn_persist"] >> xfeat_dyn_persist;
+  }
+  if (fsSettings["xfeat_adaptive_density"].empty()) {
+    xfeat_adaptive_density = 0;
+  } else {
+    fsSettings["xfeat_adaptive_density"] >> xfeat_adaptive_density;
+  }
+  if (fsSettings["xfeat_adaptive_min_ratio"].empty()) {
+    xfeat_adaptive_min_ratio = 0.5F;  // fill points pack at half min_dist
+  } else {
+    fsSettings["xfeat_adaptive_min_ratio"] >> xfeat_adaptive_min_ratio;
+  }
+  if (fsSettings["xfeat_adaptive_score_ratio"].empty()) {
+    xfeat_adaptive_score_ratio = 0.4F;  // 2nd pass accepts weaker keypoints
+  } else {
+    fsSettings["xfeat_adaptive_score_ratio"] >> xfeat_adaptive_score_ratio;
+  }
+  if (fsSettings["xfeat_semidense"].empty()) {
+    xfeat_semidense = 0;
+  } else {
+    fsSettings["xfeat_semidense"] >> xfeat_semidense;
+  }
+  if (fsSettings["xfeat_sd_radius"].empty()) {
+    xfeat_sd_radius = 24.0F;  // local search half-window (px)
+  } else {
+    fsSettings["xfeat_sd_radius"] >> xfeat_sd_radius;
+  }
+  if (fsSettings["xfeat_sd_step"].empty()) {
+    xfeat_sd_step = 4.0F;  // coarse grid step (px); parabolic refine after
+  } else {
+    fsSettings["xfeat_sd_step"] >> xfeat_sd_step;
+  }
+  if (fsSettings["xfeat_sd_thr"].empty()) {
+    xfeat_sd_thr = 0.7F;  // min cosine vs rolling reference
+  } else {
+    fsSettings["xfeat_sd_thr"] >> xfeat_sd_thr;
+  }
+
+  // ---- Observation-confidence weighting of visual residuals (Idea #6 probe) ----
+  if (fsSettings["obs_weight_mode"].empty()) {
+    obs_weight_mode = 0;  // off: uniform weighting (exact current behaviour)
+  } else {
+    fsSettings["obs_weight_mode"] >> obs_weight_mode;
+  }
+  if (fsSettings["obs_weight_min"].empty()) {
+    obs_weight_min = 0.5F;  // shortest in-window tracks keep half the information
+  } else {
+    fsSettings["obs_weight_min"] >> obs_weight_min;
+  }
+  if (fsSettings["obs_weight_sat"].empty()) {
+    obs_weight_sat = WINDOW_SIZE;  // full weight once a track spans the whole window
+  } else {
+    fsSettings["obs_weight_sat"] >> obs_weight_sat;
   }
 
     if (fsSettings["diagnostics"].empty()) {

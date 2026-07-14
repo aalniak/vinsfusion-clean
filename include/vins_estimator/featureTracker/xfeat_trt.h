@@ -1,6 +1,7 @@
 #pragma once
 #include <NvInfer.h>
 
+#include <array>
 #include <memory>
 #include <opencv2/core.hpp>
 #include <string>
@@ -34,6 +35,15 @@ class XFeatTRT {
   int engineHeight() const { return in_h_; }
   int topK() const { return top_k_; }
 
+  // True if the engine was exported with --dense (4th output dense_descriptors).
+  bool hasDense() const { return has_dense_; }
+  // Gate the (4 MB) dense-map device->host copy: enable only when a consumer (semi-dense
+  // tracking / dense cleaning) actually samples it, else it is pure per-frame overhead.
+  void setDenseEnabled(bool e) { dense_enabled_ = e; }
+  // Bilinearly sample the dense 1/8-res descriptor map at image-coord (x,y) and return
+  // the L2-normalized 64-D descriptor. Valid only after run() on a dense engine.
+  std::array<float, 64> sampleDense(float x, float y) const;
+
  private:
   void loadEngine(const std::string &path);
   void allocateBuffers();
@@ -51,12 +61,22 @@ class XFeatTRT {
   void *d_kpts_ = nullptr;
   void *d_scores_ = nullptr;
   void *d_desc_ = nullptr;
+  void *d_dense_ = nullptr;
+
+  // Dense descriptor map (semi-dense tracking). Present only on a --dense engine.
+  bool has_dense_ = false;
+  bool dense_enabled_ = true;        // copy dense map D->H this run? (set by tracker per need)
+  int d8_h_ = 0, d8_w_ = 0;          // dense map size (engine H/8, W/8)
+  float *dense_ = nullptr;           // PINNED host copy (fast async D2H); layout [c][y][x]
+  size_t dense_n_ = 0;               // == 64*d8_h_*d8_w_
+  float dense_sx_ = 0.f, dense_sy_ = 0.f;  // image-coord -> dense-cell scale (set per run)
 
   // Tensor names must match the ONNX export.
   static constexpr const char *kIn = "image";
   static constexpr const char *kKpts = "keypoints";
   static constexpr const char *kScores = "scores";
   static constexpr const char *kDesc = "descriptors";
+  static constexpr const char *kDense = "dense_descriptors";
 };
 
 }  // namespace vins::estimator

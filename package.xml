@@ -29,7 +29,12 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>image_transport</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  
+
+  <!-- MORS / NOVA / ASPN messages for the GANA endpoint (node_gana) -->
+  <depend>aspn_msgs</depend>
+  <depend>nova_msgs</depend>
+  <depend>mors_msgs</depend>
+
   <!-- System dependencies -->
   <build_export_depend>OpenCV</build_export_depend>
   <build_export_depend>Ceres</build_export_depend>

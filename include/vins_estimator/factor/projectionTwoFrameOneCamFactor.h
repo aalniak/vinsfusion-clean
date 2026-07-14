@@ -29,7 +29,8 @@ class ProjectionTwoFrameOneCamFactor
                                  const Eigen::Vector3d &_pts_j,
                                  const Eigen::Vector2d &_velocity_i,
                                  const Eigen::Vector2d &_velocity_j,
-                                 const double _td_i, const double _td_j);
+                                 const double _td_i, const double _td_j,
+                                 const double _weight = 1.0);
   virtual bool Evaluate(const double *const *parameters, double *residuals,
                         double **jacobians) const;
   void check(double **parameters);
@@ -37,6 +38,7 @@ class ProjectionTwoFrameOneCamFactor
   Eigen::Vector3d pts_i, pts_j;
   Eigen::Vector3d velocity_i, velocity_j;
   double td_i, td_j;
+  double weight_;  // Idea #6: per-feature information scale on sqrt_info (1.0 = unweighted)
   Eigen::Matrix<double, 2, 3> tangent_base;
   static Eigen::Matrix2d sqrt_info;
   static double sum_t;

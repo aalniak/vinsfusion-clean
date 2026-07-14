@@ -32,7 +32,7 @@ int FeatureManager::getFeatureCount() {
   int cnt = 0;
   for (auto &it : feature) {
     it.used_num = it.feature_per_frame.size();
-    if (it.used_num >= 4) {
+    if (it.used_num >= featureObsGate(it, params)) {
       cnt++;
     }
   }
@@ -41,7 +41,7 @@ int FeatureManager::getFeatureCount() {
 
 bool FeatureManager::addFeatureCheckParallax(
     int frame_count,
-    const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
+    const map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> &image,
     double td) {
   ROS_DEBUG("input feature: %d", (int)image.size());
   ROS_DEBUG("num of feature: %d", getFeatureCount());
@@ -127,7 +127,7 @@ void FeatureManager::setDepth(const VectorXd &x) {
   int feature_index = -1;
   for (auto &it_per_id : feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
-    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
 
     it_per_id.estimated_depth = 1.0 / x(++feature_index);
     // ROS_INFO("feature id %d , start_frame %d, depth %f ",
@@ -157,7 +157,7 @@ VectorXd FeatureManager::getDepthVector() {
   int feature_index = -1;
   for (auto &it_per_id : feature) {
     it_per_id.used_num = it_per_id.feature_per_frame.size();
-    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
 #if 1
     dep_vec(++feature_index) = 1. / it_per_id.estimated_depth;
 #else
@@ -355,7 +355,7 @@ void FeatureManager::triangulate(int /*frameCnt*/, Vector3d Ps[], Matrix3d Rs[],
       continue;
     }
     it_per_id.used_num = it_per_id.feature_per_frame.size();
-    if (it_per_id.used_num < 4) continue;
+    if (it_per_id.used_num < featureObsGate(it_per_id, params)) continue;
 
     int imu_i = it_per_id.start_frame;
     int imu_j = imu_i - 1;
@@ -525,7 +525,7 @@ double FeatureManager::compensatedParallax2(const FeaturePerId &it_per_id,
 }
 
 void FeatureManager::logFeature(
-    const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image,
+    const map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> &image,
     const string &path) {
   std::ofstream output_file(path, std::ios::app);
 

@@ -27,7 +27,7 @@ class FeatureTrackerXFeat {
  public:
   explicit FeatureTrackerXFeat(Parameters &params);
 
-  std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(
+  std::map<int, std::vector<std::pair<int, Eigen::Matrix<double, 8, 1>>>> trackImage(
       double cur_time, const cv::Mat &img, const cv::Mat &img1 = cv::Mat());
 
   void readIntrinsicParameter(const std::vector<std::string> &calib_file);

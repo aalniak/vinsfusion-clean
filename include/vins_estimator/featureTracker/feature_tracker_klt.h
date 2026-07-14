@@ -48,11 +48,11 @@ void reduceVector(vector<int> &v, vector<uchar> status);
 class FeatureTrackerKLT {
  public:
   explicit FeatureTrackerKLT(Parameters &params);
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImage(
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> trackImage(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageCUDA(
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> trackImageCUDA(
       double _cur_time, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
-  map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> trackImageVecCUDA(
+  map<int, vector<pair<int, Eigen::Matrix<double, 8, 1>>>> trackImageVecCUDA(
     double _cur_time, const cv::Mat &_img, const cv::Mat &depth, const cv::Mat &_img1 = cv::Mat());
   void readIntrinsicParameter(const vector<string> &calib_file);
   void setPrediction(map<int, Eigen::Vector3d> &predictPts);
@@ -158,6 +158,37 @@ class FeatureTrackerKLT {
   // stairs. Keyed by feature id (survives reduceVector); pruned in extractAndGuide().
   std::unordered_map<int, std::array<float, 64>> ref_desc_;
   void cleanDriftedTracks(std::vector<uchar> &status);
+
+  // Keyframe-to-keyframe wide-baseline recovery (params.xfeat_kf_recover). Every
+  // xfeat_kf_interval frames we snapshot the current XFeat extraction as a "keyframe"
+  // and anchor each live track to its nearest keyframe keypoint (kf_track_kp_). When
+  // KLT loses a track, we match the keyframe against the current frame with LighterGlue
+  // -- the WIDE-BASELINE regime where it is strongest, vs KLT's small-baseline regime --
+  // and revive the track at its DIRECT correspondence. No observation gap: the track was
+  // alive last frame and is revived this frame, so it respects VINS's consecutive-
+  // observation requirement. Distinct from recoverLostTracks (frame-to-frame, borrowed
+  // displacement); this is a direct correspondence to a stable reference frame.
+  XFeatFeatures kf_xf_;                        // keyframe XFeat snapshot
+  std::unordered_map<int, int> kf_track_kp_;   // live track id -> its keypoint index in kf_xf_
+  int frames_since_kf_ = 0;
+  int recoverFromKeyframe(std::vector<uchar> &status);
+  void maybeUpdateKeyframe();
+
+  // Dynamic / non-rigid masking (params.xfeat_dyn_mask): a feature that stays a RANSAC-F
+  // outlier (inconsistent with the dominant rigid scene motion) for xfeat_dyn_persist
+  // consecutive frames is a genuinely moving object (foliage/water/crowds) -> drop it.
+  // Persistence is the key vs one-shot rejectWithF (which hurt): a TRANSIENT outlier is
+  // usually F-estimation degeneracy under near-planar/forward motion, not a moving point.
+  std::unordered_map<int, int> dyn_strikes_;  // per-track consecutive epipolar-outlier count
+  void maskDynamicTracks();
+
+  // Semi-dense (XFeat-star) tracking (params.xfeat_semidense): track each active feature
+  // by matching its rolling reference descriptor against a LOCAL window of the current
+  // dense descriptor map around its predicted position (coarse grid search + parabolic
+  // sub-pixel refine), replacing KLT optical flow. Fully learned tracking; needs a
+  // --dense XFeat engine. sd_ref_ holds each track's rolling 64-D reference descriptor.
+  std::unordered_map<int, std::array<float, 64>> sd_ref_;
+  void trackDense(std::vector<uchar> &status);
 };
 
 }  // namespace vins::estimator
